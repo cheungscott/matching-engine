@@ -1,0 +1,19 @@
+# Build output
+/build/
+*.exe
+*.o
+*.obj
+smoke
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
