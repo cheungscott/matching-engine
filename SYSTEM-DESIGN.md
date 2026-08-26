@@ -35,6 +35,31 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
 - **Found:** `<print>` fails to link on this build (`std::__open_terminal` undefined).
 - **Chosen:** use `std::format` + `std::cout` / fmtlib instead of `std::print`.
 
+### D4 - Sanitizers tied to build type, not defaulted ON (Phase 1)
+- **Was:** `option(ME_ASAN ... ON)` applied ASan+UBSan to *every* build.
+- **Chosen:** three build types. `Debug` (-O0 -g, ASan+UBSan) for the whole test
+  suite, `TSan` (-O1 -g, TSan) for the Phase 8-9 ring only, `Bench` (-O2, no
+  sanitizers) as the ONLY build allowed to produce a latency number.
+- **Why:** ASan costs ~2x. A Phase 10 p99 measured under it is inflated and
+  unreproducible, which voids the §8 measurement discipline and would have put a
+  wrong number on the CV. ASan and TSan cannot be enabled together, hence three.
+- **Also:** CMake now warns loudly on a Debug build under MinGW, which silently
+  has no sanitizer at all.
+
+### D5 - ObjectPool must poison manually - OPEN, decide before writing it
+- **Finding:** ASan does **not** catch use-after-release in a slab pool by
+  default. The slab is one live allocation forever, so `release()` is invisible
+  to it. Verified: the identical bug fires on `new`/`delete` and is silent on a
+  pool. Blueprint invariant 7 therefore is NOT self-enforcing.
+- **Required:** `ASAN_POISON/UNPOISON` on release/acquire, via `me/asan.hpp`.
+- **Two constraints, both verified experimentally:**
+  1. Poison whole **aligned 8-byte granules**. Shadow granularity is 8 bytes, so
+     a sub-granule poison is silently ignored - a 4-byte poison did nothing.
+  2. Keep the **free-list link outside the poisoned region**, or walking your own
+     free-list trips the sanitizer.
+- **Still yours to decide:** where the link lives, hence `Order` field order;
+  fixed capacity vs grow on exhaustion; behaviour when `acquire()` finds it empty.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
