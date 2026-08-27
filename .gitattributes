@@ -1,0 +1,35 @@
+# Line-ending policy.
+#
+# This file is committed, so it travels with the repo and OVERRIDES whatever
+# core.autocrlf each machine happens to have set. That is the point: both of
+# Scott's machines, and any fresh clone, agree without local configuration.
+
+# Everything text: LF in the repository AND in the working tree.
+# Not just "LF when committed" — eol=lf also stops checkout rewriting to CRLF,
+# which is what keeps WSL happy, since /mnt/d files are the same files.
+* text=auto eol=lf
+
+# ---------------------------------------------------------------------------
+# Determinism-critical data: NEVER translate.
+#
+# The Phase 6 replay test compares golden logs BYTE FOR BYTE — that comparison
+# is the evidence for the project's central claim that the core is
+# deterministic. A line-ending conversion anywhere in that path produces diffs
+# that have nothing to do with the engine, and it would show up intermittently
+# (after a fresh clone, or on one machine only), which is the worst possible
+# failure mode for the one test whose job is to be trustworthy.
+#
+# `-text` disables eol conversion but keeps textual diffs readable, which
+# `binary` would not.
+# ---------------------------------------------------------------------------
+*.golden        -text
+tests/golden/** -text
+tests/data/**   -text
+
+# Scripts must be LF or Linux refuses them: /bin/bash^M: bad interpreter
+*.sh text eol=lf
+
+# Genuinely binary
+*.exe binary
+*.o   binary
+*.obj binary
