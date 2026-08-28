@@ -12,13 +12,14 @@
 #   cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Bench
 #   cmake --build build && ctest --test-dir build --output-on-failure
 #
-# No CMake yet? The whole Phase 1 suite builds with g++ alone:
-#   g++ -std=c++23 -Wall -Wextra -Wconversion -Iinclude tests/phase1_tests.cpp -o p1 && ./p1
-#
 # NOTE: MinGW ships no libasan and no libtsan, and TSan has never been ported to
 # Windows by any vendor. Sanitized builds require WSL/Linux. See the vault's
 # Matching-Engine-Toolchain-Decision.md.
-cmake_minimum_required(VERSION 3.24)
+#
+# NOTE: the test framework is Catch2 v3, fetched from GitHub at configure time.
+# The first configure needs network and takes a minute; after that it is cached
+# in the build directory. There is no longer a "g++ alone, no cmake" path.
+cmake_minimum_required(VERSION 3.22)   # WSL ships 3.22.1; nothing here needs 3.24
 project(matching_engine LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -30,17 +31,13 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug TSan Bench)
 
-# Warnings-as-signal. Add -Werror once the codebase settles.
-if(MSVC)
-  add_compile_options(/W4 /permissive-)
-else()
-  add_compile_options(-Wall -Wextra -Wconversion)
-endif()
-
 # ---- Sanitizers are tied to the build type, never defaulted ON globally -----
 # The old `option(ME_ASAN ... ON)` applied sanitizers to EVERY build including a
 # benchmark one. ASan costs ~2x; a latency number measured under it is inflated
 # and unreproducible, which voids the whole §8 measurement discipline.
+#
+# These are set BEFORE Catch2 is fetched, deliberately: a sanitized binary must
+# have every translation unit built and linked with the same sanitizer flags.
 if(NOT MSVC)
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -61,17 +58,43 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND WIN32 AND NOT MSVC)
     "for that. This build will compile and run, but it verifies less than it looks.")
 endif()
 
+# ---- Test framework --------------------------------------------------------
+include(FetchContent)
+FetchContent_Declare(
+  Catch2
+  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+  GIT_TAG        v3.5.2      # pinned: a floating tag makes builds unreproducible
+  GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(Catch2)
+
+# ---- Warnings --------------------------------------------------------------
+# Deliberately AFTER FetchContent: directory-scope options only reach targets
+# created later, so this warns on OUR code without drowning the output in
+# warnings from someone else's library that we are not going to fix.
+if(MSVC)
+  add_compile_options(/W4 /permissive-)
+else()
+  add_compile_options(-Wall -Wextra -Wconversion)
+endif()
+
 add_library(me_engine INTERFACE)
 target_include_directories(me_engine INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # ---- Tests -----------------------------------------------------------------
 enable_testing()
+list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+include(Catch)
 
-# Phase 1 suite: framework-free so it builds with g++ alone, no network, no CMake.
-# Retire it in favour of Catch2 once cmake is installed and FetchContent can run.
+# Phase 0: value-type invariants.
+add_executable(test_types tests/test_types.cpp)
+target_link_libraries(test_types PRIVATE me_engine Catch2::Catch2WithMain)
+catch_discover_tests(test_types)
+
+# Phase 1 acceptance suite. RED until the include/me/*.hpp bodies are written.
 add_executable(phase1_tests tests/phase1_tests.cpp)
-target_link_libraries(phase1_tests PRIVATE me_engine)
-add_test(NAME phase1 COMMAND phase1_tests)
+target_link_libraries(phase1_tests PRIVATE me_engine Catch2::Catch2WithMain)
+catch_discover_tests(phase1_tests)
 
 # Benchmarks never link a sanitizer; guard against being built in Debug by mistake.
 if(CMAKE_BUILD_TYPE STREQUAL "Bench")

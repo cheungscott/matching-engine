@@ -60,6 +60,33 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
 - **Still yours to decide:** where the link lives, hence `Order` field order;
   fixed capacity vs grow on exhaustion; behaviour when `acquire()` finds it empty.
 
+### D6 - v0.1 gate re-cut: correctness + measurement, concurrency deferred (2026-08-27)
+- **Chosen:** v0.1 shipping on Sun 6 Sep = **Phases 1-7 (correct, oracle-verified,
+  fuzz-green book) + the Phase 10 benchmark rig + one honest `perf` pass**.
+  Phases 8-9 (SPSC ring, single-writer integration) DEFER to v1.5.
+- **Was:** the locked plan's minimum signal-bearing v0.1 = Phases 1-4 + 8-9, i.e.
+  the book plus the ring, with metrics following separately Sep 7-18.
+- **Why the swap.** Under the 2026-08-19 positioning pivot the engine's job is to
+  win the Jan-Apr 2027 host-matching call, not to sit on the CV as a title. In that
+  room "I built a matching engine" is unremarkable; "I profiled it, `perf` fingered
+  X, I changed Y, p99 went A to B" is not. A ring buffer with no measurement reads
+  as copied; a single-threaded book with real profiling data reads as an engineer.
+  Also: the TARGET CV bullet is *gated* on a measured number, so shipping without
+  Phase 10 means the CV gains nothing at all on 6 Sep.
+- **Cost accepted:** the repo loses its most scannable "wants systems" keyword
+  (lock-free / single-writer) until v1.5. Mitigated by the README stating the ring
+  as designed-and-deferred with the Blueprint §5.2 reasoning intact.
+- **Cheap win folded in:** point the Phase 10 rig at the `NaiveBook` oracle as a
+  performance baseline, not just a correctness oracle. That converts the tick-array
+  and object-pool choices (Blueprint §3.2, §3.3) from asserted to measured for
+  near-zero extra build cost, and supplies the before/after delta the profiling
+  story needs.
+- **Ordering consequence:** Phase 7 (property + differential fuzz) stays the gate,
+  but it now gates *measurement* rather than concurrency.
+- **Revisit trigger:** if Phases 1-7 are green before Sun 30 Aug, Phase 8 (ring in
+  isolation, TSan) re-enters scope - it is self-contained and does not touch the
+  book.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
