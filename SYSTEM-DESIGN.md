@@ -60,7 +60,7 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
 - **Still yours to decide:** where the link lives, hence `Order` field order;
   fixed capacity vs grow on exhaustion; behaviour when `acquire()` finds it empty.
 
-### D6 - v0.1 gate re-cut: correctness + measurement, concurrency deferred (2026-08-27)
+### D6 - v0.1 gate re-cut: correctness + measurement, concurrency deferred (2026-08-29)
 - **Chosen:** v0.1 shipping on Sun 6 Sep = **Phases 1-7 (correct, oracle-verified,
   fuzz-green book) + the Phase 10 benchmark rig + one honest `perf` pass**.
   Phases 8-9 (SPSC ring, single-writer integration) DEFER to v1.5.
@@ -83,7 +83,7 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
   story needs.
 - **Ordering consequence:** Phase 7 (property + differential fuzz) stays the gate,
   but it now gates *measurement* rather than concurrency.
-- **Revisit trigger:** if Phases 1-7 are green before Sun 30 Aug, Phase 8 (ring in
+- **Revisit trigger:** if Phases 1-4 are green before Wed 2 Sep, Phase 8 (ring in
   isolation, TSan) re-enters scope - it is self-contained and does not touch the
   book.
 
