@@ -56,6 +56,28 @@ decision was made, including the ones later reversed.
 - **Left open at this point:** where the link lives, hence `Order` field order;
   fixed capacity vs grow on exhaustion; behaviour when `acquire()` finds it empty.
 
+### D6 - v0.1 gate re-cut: correctness + measurement, concurrency deferred (2026-08-27)
+- **Chosen:** v0.1 shipping on Sun 6 Sep = **Phases 1-7 (correct, oracle-verified,
+  fuzz-green book) + the Phase 10 benchmark rig + one honest `perf` pass**.
+  Phases 8-9 (SPSC ring, single-writer integration) DEFER to v1.5.
+- **Was:** the planned v0.1 = Phases 1-4 + 8-9, i.e.
+  the book plus the ring, with metrics following separately Sep 7-18.
+- **Why the swap.** A measured single-threaded book is stronger evidence than an
+  unmeasured ring: "I profiled it, `perf` fingered X, I changed Y, p99 went A to B"
+  says more than "it has a ring buffer". Measurement ships first; the ring moves to v1.5.
+- **Cost accepted:** no lock-free / single-writer ingress until v1.5. Mitigated by the README stating the ring
+  as designed-and-deferred with the Blueprint §5.2 reasoning intact.
+- **Cheap win folded in:** point the Phase 10 rig at the `NaiveBook` oracle as a
+  performance baseline, not just a correctness oracle. That converts the tick-array
+  and object-pool choices (Blueprint §3.2, §3.3) from asserted to measured for
+  near-zero extra build cost, and supplies the before/after delta the profiling
+  story needs.
+- **Ordering consequence:** Phase 7 (property + differential fuzz) stays the gate,
+  but it now gates *measurement* rather than concurrency.
+- **Revisit trigger:** if Phases 1-7 are green before Sun 30 Aug, Phase 8 (ring in
+  isolation, TSan) re-enters scope - it is self-contained and does not touch the
+  book.
+
 ---
 
 ## Open questions
