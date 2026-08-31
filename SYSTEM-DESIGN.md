@@ -60,6 +60,22 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
 - **Still yours to decide:** where the link lives, hence `Order` field order;
   fixed capacity vs grow on exhaustion; behaviour when `acquire()` finds it empty.
 
+**Update (D7 resolves the blocking part).** With links at offsets 48-63, BOTH
+free-list designs now have a valid, 8-aligned poison span, so D7 does not force
+this choice:
+
+| Free-list design | Poison span on release | Coverage |
+|---|---|---|
+| separate index array | `[0, 64)` - the whole object | links poisoned too, so walking a released order's `next` is caught |
+| reuse `Order::next` | `[0, 48)` | links must stay readable, so that bug is NOT caught |
+
+**Recommendation (final call belongs to whoever writes the pool):** the separate
+index array. It costs 4 bytes per slot, it poisons strictly more, and it keeps
+`ObjectPool<T>` genuinely generic - reusing `next` silently requires every `T` to
+have a `next` pointer, which is a hidden coupling. Reusing `next` is a legitimate
+memory optimisation later; it is entirely internal to `ObjectPool`, so switching
+costs nothing.
+
 ### D6 - v0.1 gate re-cut: correctness + measurement, concurrency deferred (2026-08-29)
 - **Chosen:** v0.1 shipping on Sun 6 Sep = **Phases 1-7 (correct, oracle-verified,
   fuzz-green book) + the Phase 10 benchmark rig + one honest `perf` pass**.
@@ -86,6 +102,113 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
 - **Revisit trigger:** if Phases 1-4 are green before Wed 2 Sep, Phase 8 (ring in
   isolation, TSan) re-enters scope - it is self-contained and does not touch the
   book.
+
+### D7 - Order layout: one cache line, aligned, Blueprint field order (Phase 1)
+
+- **Chosen:** `Price` -> `int32_t`, `ParticipantId` -> `uint32_t`, `SeqNum` stays
+  `uint64_t`, `alignas(64)` on `Order`, Blueprint §3.5 field order kept, and two
+  `static_assert`s pinning both `sizeof` and `alignof` to 64.
+- **Result, verified:** `sizeof(Order)==64`, `alignof(Order)==64`, `price@12`,
+  `participant@40`, `prev@48`, `next@56`.
+
+**Alternatives, measured rather than argued** (vector of 4-8, counting how many
+elements span two 64-byte cache lines):
+
+| Candidate | sizeof | alignof | straddles a line |
+|---|---|---|---|
+| links last, all 64-bit | 72 | 8 | 4 of 4 |
+| links first, all 64-bit | 72 | 8 | 4 of 4 |
+| narrowed, no alignas | 56 | 8 | **3 of 4** |
+| narrowed + alignas(64) | 64 | 64 | 0 of 4 |
+| **chosen: Blueprint order, narrowed, alignas(64)** | **64** | **64** | **0 of 8** |
+
+> [!important] The finding that decided it
+> **Fitting inside 64 bytes is NOT sufficient.** Cache lines sit at fixed
+> boundaries, so 56-byte objects packed end to end start at 0, 56, 112, 168 and
+> only the first begins on a boundary. The 56-byte candidate fits comfortably and
+> still straddled 3 times in 4. `alignas(64)` is what buys the guarantee, and it
+> is doing real work here, not decoration.
+
+- **Why it matters:** `Order` is the most-touched object in the engine - every
+  message reads at least one. A straddling Order costs two memory fetches per
+  touch instead of one, permanently.
+- **Why narrowing is nearly free:** `side` and `type` are one byte each and
+  adjacent, leaving 2 bytes of padding. A 32-bit `price` drops straight into that
+  gap. The only genuine cost is the stated range assumption.
+- **Assumptions now on the record:** prices fit in ±2.1e9 ticks; fewer than 4.3e9
+  distinct participants. Both are far outside any real instrument.
+- **What was protected and why:** `SeqNum` stays 64-bit. `entry_seq` IS time
+  priority; a wrapped sequence number would let two orders claim the same queue
+  position. That is a correctness bug, not a performance one, so it is not a
+  field to shrink for convenience.
+- **Cost accepted:** 8 bytes of padding per order (56 -> 64). At a 100k-order pool
+  that is ~800 KB. Also `Order` is now over-aligned, so any future field that
+  pushes it past 64 jumps it to 128 - which is exactly what the size
+  `static_assert` exists to catch loudly.
+- **Deliberately NOT done:** reordering fields by hot/cold access pattern
+  (Blueprint §8). While the whole object is one line the ordering cannot matter,
+  because the fetch brings all 64 bytes regardless. It only becomes real if
+  `Order` ever exceeds one line.
+- **Revisit trigger (Phase 10, measurable):** tight packing without alignment
+  fits more orders per line, which favours sweeping a level front to back;
+  alignment favours touching one order at a random position. This engine mostly
+  does the latter, so alignment should win - but "should" is an argument, not a
+  measurement. Good candidate for the Module 4 before/after.
+
+### D8 - Pool safety checks are unconditional; acquire() clears the slot (Phase 1)
+**, 2026-08-30.** Starts from PR #1 and fixes what an
+independent review found. Recorded here because Scott did not type it.
+
+**The defect.** PR #1 implemented both of `release()`'s safety checks as `assert`. The `Bench`
+configuration is `-O2 -g -DNDEBUG`, i.e. the only build allowed to produce a latency number.
+`NDEBUG` deletes both. Verified with those exact flags, on the pre-fix code:
+
+- **Double release:** the second call succeeded, `in_use_` underflowed to `SIZE_MAX`, and the
+  next two `acquire()` calls returned **the same slot** - verbatim the corruption decision (e)
+  claimed to prevent.
+- **Foreign pointer:** `next_free_[kNil]` is `vector::operator[]`, unchecked - a wild WRITE
+  ~16 GB out. And `poison_payload` ran *before* the check, so 64 bytes the pool does not own
+  were already marked dead.
+- **Interior pointer:** the range test accepted a pointer 8 bytes into a valid slot, and
+  `slot - base` on a non-boundary pointer is UB. g++ 11 produced garbage that was neither in
+  range nor `kNil`, so the sentinel check did not fire and release SEGVd - in a **Debug** build
+  with ASan, UBSan and asserts all enabled. UBSan did not diagnose the subtraction.
+
+**The rule adopted:** a check that prevents MEMORY CORRUPTION is unconditional; a check that
+merely catches programmer error may be `assert`. Both checks here are the former, and both cost
+one comparison against a value already in cache.
+
+**And no `assert(false)` on the rejection paths.** That would have re-created the original hole
+from the other side: unconditional checks whose failure modes still abort, hence still untestable
+under Catch2, which has no death tests. That is exactly why PR #1's two headline properties had
+no test and why deleting the poisoning left all 28 tests green. So `release()` returns `bool` and
+the pool REPORTS while the caller DECIDES - a `false` at a call site is a caller bug, and the
+Engine should assert there, where there is context to say something useful.
+
+**Also fixed:** `index_of` now uses `uintptr_t` (relational comparison of pointers into different
+objects is unspecified per `[expr.rel]`) and checks element alignment, not just range. The
+constructor's capacity guard moved into the member-init list, where it runs *before* the vectors
+are sized - in the body it was dead code, since `bad_alloc` always fired first. `empty()` renamed
+to `exhausted()`: it meant the opposite of `PriceLevel::empty()` in the same directory.
+`free_list_is_consistent()` added, because `in_use_` and `free_head_` were two sources of truth
+that nothing reconciled.
+
+**acquire() now value-initialises the slot.** PR #1 left the previous occupant's bytes, which was
+documented and harmless - until `types.hpp` gained intrusive `prev`/`next` (D7). A `push_back`
+that reads a stale `next` splices a cycle into a `PriceLevel`, and **ASan cannot see it**, because
+those bytes are legitimately live after `acquire()`. Cost is one 64-byte store to a line the
+caller is about to write anyway. Reversible if Phase 10 measures it as material.
+
+**Tests added** for every behaviour that had none: double release, foreign pointer, interior
+pointer, inherited-state clearing, exhaustion and recovery, free-list consistency under 200
+rounds of churn, capacity 0 and 1. 13 pool cases, 3863 assertions, green under ASan.
+
+**Still open, not fixed here:** D5's framing presents the free-list-link choice as two-way, but
+`asan.hpp` rule 2 offers a third option that was dropped in every restatement - "keep the link
+outside the poisoned region **or unpoison before traversing**". Link-inside-T plus an 8-byte
+unpoison costs no second array and constrains `Order` only to "reserve 8 bytes somewhere". It may
+still lose on the merits; it was never weighed. Also: PR #1's body and D5 both cite verification
+on **g++ 13.3**, which does not exist in this environment (WSL has 11.4 only).
 
 ---
 

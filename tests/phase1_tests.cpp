@@ -110,6 +110,159 @@ TEST_CASE("pool_slots_are_writable_after_acquire", "[phase1][pool]") {
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Invariant 7, the half ASan is blind to.
+//
+//  Poisoning catches use-AFTER-release. It says nothing about releasing twice,
+//  or releasing a pointer the pool never owned — those corrupt the LINK array,
+//  not the payload. These tests exist because that was the gap: PR #1 asserted
+//  both properties and tested neither, and an assert cannot be tested under
+//  Catch2 at all. release() returning bool is what makes them observable.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("pool_release_reports_success", "[phase1][pool]") {
+    ObjectPool<Order> pool(4);
+    Order* a = pool.acquire();
+    REQUIRE(a != nullptr);
+    CHECK(pool.release(a));                       // true == actually released
+    CHECK(pool.in_use() == std::size_t{0});
+}
+
+TEST_CASE("pool_release_null_is_a_noop", "[phase1][pool]") {
+    ObjectPool<Order> pool(4);
+    Order* a = pool.acquire();
+    REQUIRE(a != nullptr);
+    CHECK_FALSE(pool.release(nullptr));
+    CHECK(pool.in_use() == std::size_t{1});       // unchanged
+    CHECK(pool.free_list_is_consistent());
+}
+
+TEST_CASE("pool_double_release_is_rejected_not_absorbed", "[phase1][pool]") {
+    // The corruption this prevents, verified on the pre-fix code with -DNDEBUG:
+    // the second release spliced the free list into a cycle, in_use_ underflowed
+    // to SIZE_MAX, and the next two acquires returned THE SAME SLOT.
+    ObjectPool<Order> pool(4);
+    Order* a = pool.acquire();
+    REQUIRE(a != nullptr);
+
+    CHECK(pool.release(a));                       // first: genuine
+    CHECK_FALSE(pool.release(a));                 // second: refused
+    CHECK(pool.in_use() == std::size_t{0});       // no underflow
+    CHECK(pool.available() == pool.capacity());
+    CHECK(pool.free_list_is_consistent());        // no cycle
+
+    // And the slot is still handed out exactly once afterwards.
+    Order* x = pool.acquire();
+    Order* y = pool.acquire();
+    CHECK(x != y);
+}
+
+TEST_CASE("pool_release_rejects_a_foreign_pointer", "[phase1][pool]") {
+    // Pre-fix with -DNDEBUG this was a wild WRITE ~16 GB out, after 64 bytes of
+    // memory the pool does not own had already been poisoned.
+    ObjectPool<Order> pool(4);
+    Order* a = pool.acquire();
+    REQUIRE(a != nullptr);
+
+    Order stack_order = make_order(99, Side::Buy, 100, 10, 99);
+    CHECK_FALSE(pool.release(&stack_order));
+    CHECK(pool.in_use() == std::size_t{1});       // untouched
+    CHECK(pool.free_list_is_consistent());
+    CHECK(stack_order.id == OrderId{99});         // and not poisoned
+}
+
+TEST_CASE("pool_release_rejects_an_interior_pointer", "[phase1][pool]") {
+    // A pointer 8 bytes into a valid slot passes a range check but is not an
+    // element boundary. Pre-fix, `slot - base` on it was undefined behaviour:
+    // g++ 11 produced garbage that was neither in range nor kNil, so the sentinel
+    // check did not fire and release() SEGVd — in a Debug build with ASan, UBSan
+    // and asserts all on. UBSan did not diagnose the subtraction.
+    ObjectPool<Order> pool(4);
+    Order* a = pool.acquire();
+    REQUIRE(a != nullptr);
+
+    auto* interior = reinterpret_cast<Order*>(reinterpret_cast<std::byte*>(a) + 8);
+    CHECK_FALSE(pool.release(interior));
+    CHECK(pool.in_use() == std::size_t{1});
+    CHECK(pool.free_list_is_consistent());
+}
+
+TEST_CASE("pool_acquire_clears_inherited_state", "[phase1][pool]") {
+    // D8. Harmless until types.hpp gained intrusive prev/next — after which a
+    // push_back that reads a stale `next` splices a cycle into a PriceLevel, and
+    // ASan cannot see it because those bytes are legitimately live after acquire.
+    ObjectPool<Order> pool(1);                    // capacity 1 forces the same slot back
+
+    Order* first = pool.acquire();
+    REQUIRE(first != nullptr);
+    *first = make_order(7, Side::Sell, 105, 42, 7);
+    first->next = first;                          // the stale link that would bite
+    first->prev = first;
+    REQUIRE(pool.release(first));
+
+    Order* second = pool.acquire();
+    REQUIRE(second != nullptr);
+    REQUIRE(second == first);                     // same slot, recycled
+    CHECK(second->next == nullptr);
+    CHECK(second->prev == nullptr);
+    CHECK(second->id == OrderId{0});
+    CHECK(second->remaining == Quantity{0});
+}
+
+TEST_CASE("pool_exhausts_then_recovers", "[phase1][pool]") {
+    ObjectPool<Order> pool(2);
+    Order* a = pool.acquire();
+    Order* b = pool.acquire();
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+
+    CHECK(pool.exhausted());
+    CHECK(pool.acquire() == nullptr);             // and does not consume anything
+    CHECK(pool.in_use() == std::size_t{2});
+
+    REQUIRE(pool.release(a));
+    CHECK_FALSE(pool.exhausted());
+    CHECK(pool.acquire() != nullptr);
+    (void)b;
+}
+
+TEST_CASE("pool_free_list_survives_churn", "[phase1][pool]") {
+    ObjectPool<Order> pool(8);
+    std::vector<Order*> live;
+
+    for (int round = 0; round < 200; ++round) {
+        while (!pool.exhausted()) {
+            Order* p = pool.acquire();
+            REQUIRE(p != nullptr);
+            live.push_back(p);
+        }
+        REQUIRE(pool.free_list_is_consistent());
+        for (Order* p : live) REQUIRE(pool.release(p));
+        live.clear();
+        REQUIRE(pool.free_list_is_consistent());
+        REQUIRE(pool.in_use() == std::size_t{0});
+    }
+}
+
+TEST_CASE("pool_degenerate_capacities", "[phase1][pool]") {
+    SECTION("capacity 0 is a valid, permanently exhausted pool") {
+        ObjectPool<Order> pool(0);
+        CHECK(pool.capacity() == std::size_t{0});
+        CHECK(pool.exhausted());
+        CHECK(pool.acquire() == nullptr);
+        CHECK(pool.free_list_is_consistent());
+    }
+    SECTION("capacity 1 round-trips") {
+        ObjectPool<Order> pool(1);
+        Order* a = pool.acquire();
+        REQUIRE(a != nullptr);
+        CHECK(pool.acquire() == nullptr);
+        REQUIRE(pool.release(a));
+        CHECK(pool.acquire() == a);
+        CHECK(pool.free_list_is_consistent());
+    }
+}
+
 // ===========================================================================
 //  PriceLevel — FIFO by arrival, O(1) unlink, cached total
 // ===========================================================================

@@ -1,35 +1,19 @@
-// me/object_pool.hpp — pre-allocated slab + free-list. Phase 1.
+// me/object_pool.hpp — pre-allocated slab + free-list.
 //
-// ===========================================================================
-//  THE BODIES ARE YOURS. Signatures exist so the tests compile; every one of
-//  them currently lies. Make tests/phase1_tests.cpp pass.
-// ===========================================================================
+// Fixed-capacity recycler for T. Removes the allocator from the hot path: its
+// worst case is unbounded, and unbounded is what disqualifies it.
 //
-// WHY A POOL AT ALL (three independent reasons — interviewers want all three):
-//   1. Allocator latency is variable and occasionally UNBOUNDED (internal locks,
-//      page faults on fresh memory). Unbounded is what disqualifies it, not slow.
-//   2. Allocations scatter related objects, destroying locality for every later
-//      traversal of the book.
-//   3. Churn fragments the heap.
-// A pool converts an unbounded-latency operation into a pointer bump.
-//
-// DESIGN DECISIONS THAT ARE YOURS TO MAKE (log them in SYSTEM-DESIGN.md):
-//   - Fixed capacity, or grow on exhaustion? Blueprint §10g lists this open.
-//     Growing reintroduces an unbounded allocation on the hot path; rejecting
-//     means the venue can refuse an order because it is full. Pick and justify.
-//   - What does acquire() do when empty? nullptr, throw, or assert?
-//   - Where does the free-list link live? See the ASan rules in me/asan.hpp —
-//     if the link sits inside the poisoned region you will trip your own
-//     sanitizer walking your own free-list.
-//
-// THE INVARIANT THIS EXISTS TO UPHOLD (Blueprint invariant 7):
-//   Every reachable Order* is a live acquired slot; every unlinked order returns
-//   to the pool EXACTLY ONCE. No double-free, no leak.
+// Rationale for every choice here lives in SYSTEM-DESIGN.md D5 and D8.
+// Implementation , 2026-08-30.
 #pragma once
 
 #include "me/asan.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace me {
@@ -37,36 +21,149 @@ namespace me {
 template <typename T>
 class ObjectPool {
 public:
-    explicit ObjectPool(std::size_t capacity) : slab_(capacity) {
-        // TODO(you): thread every slot onto the free-list, then poison the
-        // payload of each one. Remember: aligned granules only, and leave the
-        // link readable.
+    using Index = std::uint32_t;
+
+    static constexpr Index kNil   = std::numeric_limits<Index>::max();       // end of list
+    static constexpr Index kInUse = std::numeric_limits<Index>::max() - 1;   // handed out
+    static constexpr std::size_t kMaxCapacity = kInUse;
+
+    static_assert(std::is_default_constructible_v<T>);
+    static_assert(std::is_copy_assignable_v<T> || std::is_move_assignable_v<T>);
+
+    explicit ObjectPool(std::size_t capacity)
+        : slab_(checked_capacity(capacity)), next_free_(capacity, kNil) {
+        // Threaded back-to-front so the head lands on index 0 and a fresh pool
+        // hands out slots in ascending address order.
+        free_head_ = kNil;
+        for (std::size_t n = capacity; n-- > 0;) {
+            const Index i = static_cast<Index>(n);
+            next_free_[i] = free_head_;
+            free_head_    = i;
+            poison_payload(slab_.data() + i);
+        }
     }
 
-    // Hand out a slot. Contents are unspecified — the caller initialises.
-    [[nodiscard]] T* acquire() {
-        // TODO(you): pop the free-list head, unpoison the payload, return it.
-        return nullptr;
+    // The pool hands out interior pointers to its own storage, so "which pool
+    // owns this slot" must have exactly one answer. See D5.
+    ObjectPool(const ObjectPool&)            = delete;
+    ObjectPool& operator=(const ObjectPool&) = delete;
+    ObjectPool(ObjectPool&&)                 = delete;
+    ObjectPool& operator=(ObjectPool&&)      = delete;
+
+    ~ObjectPool() {
+        // Required: poison lives in ASan's shadow map, not the memory, so it
+        // outlives the slab and would fire on innocent code later.
+        for (std::size_t i = 0; i < slab_.size(); ++i) {
+            unpoison_payload(slab_.data() + i);
+        }
     }
 
-    // Return a slot. After this call the caller's pointer is DEAD; touching it
-    // is the bug ASan is here to catch.
-    void release(T* /*slot*/) {
-        // TODO(you): push onto the free-list and poison the payload.
+    // nullptr when exhausted. The slot is value-initialised (D8).
+    [[nodiscard]] T* acquire() noexcept {
+        if (free_head_ == kNil) {
+            return nullptr;
+        }
+
+        const Index i = free_head_;
+        free_head_    = next_free_[i];
+        next_free_[i] = kInUse;
+        ++in_use_;
+
+        T* slot = slab_.data() + i;
+        unpoison_payload(slot);
+        *slot = T{};
+        return slot;
     }
 
-    // Slots currently handed out. Tests use this to prove release() recycles
-    // rather than leaking.
-    [[nodiscard]] std::size_t in_use() const noexcept {
-        return 0;   // TODO(you)
+    // false = null, foreign, mis-aligned, or already free. Nothing is mutated in
+    // those cases. Both checks are unconditional, not assert: see D8.
+    bool release(T* slot) noexcept {
+        if (slot == nullptr) {
+            return false;
+        }
+
+        const Index i = index_of(slot);
+        if (i == kNil) {
+            return false;                   // else next_free_[kNil] is a wild write
+        }
+        if (next_free_[i] != kInUse) {
+            return false;                   // double release would splice a cycle
+        }
+
+        poison_payload(slot);               // only after the pointer is proven ours
+        next_free_[i] = free_head_;
+        free_head_    = i;
+        --in_use_;
+        return true;
     }
 
-    [[nodiscard]] std::size_t capacity() const noexcept { return slab_.size(); }
+    [[nodiscard]] std::size_t in_use()    const noexcept { return in_use_; }
+    [[nodiscard]] std::size_t available() const noexcept { return slab_.size() - in_use_; }
+    [[nodiscard]] std::size_t capacity()  const noexcept { return slab_.size(); }
+
+    // Not empty(): PriceLevel::empty() means "holds nothing", this is its opposite.
+    [[nodiscard]] bool exhausted() const noexcept { return free_head_ == kNil; }
+
+    // Acyclic, and exactly available() long. O(capacity) — tests and Phase 4's
+    // check_invariants(), never the hot path.
+    [[nodiscard]] bool free_list_is_consistent() const noexcept {
+        std::size_t seen = 0;
+        Index cursor = free_head_;
+        while (cursor != kNil) {
+            if (cursor >= capacity())          return false;   // before indexing, not after
+            if (next_free_[cursor] == kInUse)  return false;
+            if (++seen > capacity())           return false;   // cycle
+            cursor = next_free_[cursor];
+        }
+        return seen == available();
+    }
 
 private:
-    std::vector<T> slab_;      // one contiguous allocation, made once
-    T*             free_head_ = nullptr;
-    std::size_t    in_use_    = 0;
+    static std::size_t checked_capacity(std::size_t n) {
+        // In the init list, so it runs before the vectors are sized.
+        if (n > kMaxCapacity) {
+            throw std::length_error("ObjectPool capacity exceeds the 32-bit index space");
+        }
+        return n;
+    }
+
+    // kNil unless `slot` is a live element boundary of this slab.
+    // uintptr_t because comparing pointers into different objects is unspecified;
+    // the % check because a range test alone accepts interior pointers, and
+    // subtracting those is UB that neither ASan nor UBSan diagnoses.
+    [[nodiscard]] Index index_of(const T* slot) const noexcept {
+        const auto base = reinterpret_cast<std::uintptr_t>(slab_.data());
+        const auto addr = reinterpret_cast<std::uintptr_t>(slot);
+        if (addr < base) {
+            return kNil;
+        }
+        const std::uintptr_t offset = addr - base;
+        if (offset % sizeof(T) != 0) {
+            return kNil;
+        }
+        const std::uintptr_t idx = offset / sizeof(T);
+        return idx < slab_.size() ? static_cast<Index>(idx) : kNil;
+    }
+
+    // Poison whole aligned 8-byte granules or it is silently ignored (asan.hpp).
+    static constexpr bool kPoisonable = (alignof(T) % kAsanGranule == 0);
+
+    static_assert(!ME_HAS_ASAN || kPoisonable,
+                  "ObjectPool<T>: alignof(T) < 8, so poisoning would be silently ignored "
+                  "and pool discipline for this T is UNVERIFIED.");
+
+    static void poison_payload([[maybe_unused]] T* slot) noexcept {
+        if constexpr (kPoisonable) { ME_POISON(slot, granule_floor(sizeof(T))); }
+    }
+
+    static void unpoison_payload([[maybe_unused]] T* slot) noexcept {
+        if constexpr (kPoisonable) { ME_UNPOISON(slot, granule_floor(sizeof(T))); }
+    }
+
+    std::vector<T>     slab_;        // one allocation, made once
+    std::vector<Index> next_free_;   // free-list links, separate, never poisoned
+    Index              free_head_ = kNil;
+    std::size_t        in_use_    = 0;
 };
 
 } // namespace me
