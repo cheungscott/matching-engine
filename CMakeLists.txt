@@ -104,4 +104,8 @@ catch_discover_tests(phase1_tests)
 if(CMAKE_BUILD_TYPE STREQUAL "Bench")
   add_executable(bench_latency bench/latency.cpp)
   target_link_libraries(bench_latency PRIVATE me_engine)
+
+  # One operation kind in a tight loop, for perf to sample (D18).
+  add_executable(bench_profile bench/profile.cpp)
+  target_link_libraries(bench_profile PRIVATE me_engine)
 endif()
