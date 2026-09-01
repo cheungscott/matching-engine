@@ -49,6 +49,25 @@ public:
         return id;
     }
 
+    // The obvious implementation: look everywhere until you find it. This is
+    // exactly the O(total orders) scan the real book has an index to avoid, and
+    // writing it out is the clearest statement of what that index buys.
+    bool cancel(OrderId id) {
+        for (auto* side : {&bids_, &asks_}) {
+            for (auto it = side->begin(); it != side->end(); ++it) {
+                auto& queue = it->second;
+                for (auto q = queue.begin(); q != queue.end(); ++q) {
+                    if (q->id == id) {
+                        queue.erase(q);
+                        if (queue.empty()) side->erase(it);
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     [[nodiscard]] std::optional<Price> best_bid() const {
         if (bids_.empty()) return std::nullopt;
         return bids_.rbegin()->first;              // highest bid
