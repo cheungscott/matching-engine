@@ -5,6 +5,7 @@
 // are event-sourced systems: their product IS the event stream.
 //
 // Rationale in SYSTEM-DESIGN.md D15.
+// . See WORKING-RULES.md for the mode rule.
 #pragma once
 
 #include "me/types.hpp"
@@ -20,13 +21,15 @@ namespace me {
 enum class RejectReason : std::uint8_t {
     InvalidQuantity,
     PriceOutOfRange,
-    PoolExhausted,      // the venue is at its order-capacity limit
+    PoolExhausted,      // at capacity AND the order could not have traded
     UnknownOrder,       // cancel for something not resting — routine, not a defect
+    MalformedOrder,     // D25.1: a Side or OrderType outside its enumerators
 };
 
 enum class CancelReason : std::uint8_t {
     UserRequested,
     NoLiquidity,        // a market order's unfillable remainder
+    PoolExhausted,      // D25.2: filled what it could, no slot left for the remainder
 };
 
 struct OrderAccepted {
@@ -61,9 +64,21 @@ using Event = std::variant<OrderAccepted, OrderRejected, TradeExecuted, OrderCan
 
 // Where events go. Vector-in-tests, file or socket later — the engine does not
 // care, which is what keeps the core free of I/O.
+//
+// D25.3 — `publish` is noexcept, and that is a CONTRACT, not a decoration. Engine::emit
+// is noexcept because it runs mid-match, with an order half-way between the pool and a
+// price level; there is no correct place to unwind to. Previously `publish` could throw
+// into a noexcept frame, which is std::terminate — reached by nothing more exotic than
+// a bad_alloc from the test sink's push_back.
+//
+// So a sink MUST NOT throw. A sink that can fail (file, socket) must absorb its own
+// errors and report them out of band, and a sink that allocates must reserve up front.
+// This makes an allocation failure inside publish fatal, which is the honest position
+// for a matching core: it is not recoverable mid-match, and pretending otherwise buys
+// an unwind path that would leave the book in a state no invariant describes.
 struct EventSink {
     virtual ~EventSink() = default;
-    virtual void publish(const Event&) = 0;
+    virtual void publish(const Event&) noexcept = 0;
 };
 
 // Collects events in memory. The test sink, and the fold-into-a-book sink.
@@ -80,7 +95,7 @@ struct EventSink {
 // not grow (ring buffer, file, socket). The engine cannot bound this for them.
 class VectorSink final : public EventSink {
 public:
-    void publish(const Event& e) override { events_.push_back(e); }
+    void publish(const Event& e) noexcept override { events_.push_back(e); }
     [[nodiscard]] const std::vector<Event>& events() const noexcept { return events_; }
     void clear() noexcept { events_.clear(); }
 
@@ -102,7 +117,7 @@ inline std::string to_line(const Event& e) {
     // std::to_underlying (C++23) rather than a hand-written cast: it cannot pick
     // the wrong type if an enum's underlying type changes, and this is exactly
     // the log-serialisation use Blueprint §7 named it for.
-    auto enum_num = [](auto e) { return std::to_string(std::to_underlying(e)); };
+    auto enum_num = [](auto v) { return std::to_string(std::to_underlying(v)); };
 
     if (const auto* a = std::get_if<OrderAccepted>(&e)) {
         return "ACC " + num(a->seq) + ' ' + num(a->id) + ' '

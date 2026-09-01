@@ -14,6 +14,7 @@
 // The key observation: **at most `capacity` orders can rest at once**, because
 // the pool says so. Live entries are bounded even though ids are not, so the
 // table can be sized once from the pool and never grow.
+// . See WORKING-RULES.md for the mode rule.
 #pragma once
 
 #include "me/types.hpp"
@@ -34,19 +35,36 @@ public:
         : table_(std::bit_ceil(std::max<std::size_t>(capacity, 1) * 2)),
           mask_(table_.size() - 1) {}
 
+    // True when another insert would breach the load factor the probe loops rely on.
+    // Public so the CALLER can refuse before mutating anything — see OrderBook::add.
+    [[nodiscard]] bool full() const noexcept { return (count_ + 1) * 2 > table_.size(); }
+
+    // D25.9 — every probe loop is bounded by the table size.
+    //
+    // These were `for(;;)`, terminating only because an empty slot always exists, which
+    // held only because of an `assert` on the load factor — and asserts are deleted in
+    // the build that ships. With a full table, a lookup of a missing id SPUN FOREVER.
+    // A hang is the worst failure a trading process has: no crash, no core, no log, and
+    // a watchdog is the only thing that ever notices. Bounding the loop costs one
+    // comparison per probe and converts an unbounded hang into a miss.
     [[nodiscard]] Order* find(OrderId id) const noexcept {
-        assert(id != kEmpty);
-        for (std::size_t i = home(id);; i = (i + 1) & mask_) {
+        if (id == kEmpty) return nullptr;
+        std::size_t i = home(id);
+        for (std::size_t probes = 0; probes < table_.size(); ++probes, i = (i + 1) & mask_) {
             if (table_[i].id == kEmpty) return nullptr;
             if (table_[i].id == id)     return table_[i].node;
         }
+        return nullptr;
     }
 
+    // Precondition, enforced by the caller via full(): the table has room. Kept noexcept
+    // so OrderBook::add cannot throw AFTER it has already linked the order into a level.
     void insert(OrderId id, Order* node) noexcept {
         assert(id != kEmpty && node != nullptr);
-        assert(count_ * 2 < table_.size() && "id index over half full — capacity math is wrong");
+        assert(!full() && "IdIndex::insert on a full table — caller skipped full()");
 
-        for (std::size_t i = home(id);; i = (i + 1) & mask_) {
+        std::size_t i = home(id);
+        for (std::size_t probes = 0; probes < table_.size(); ++probes, i = (i + 1) & mask_) {
             if (table_[i].id == kEmpty) {
                 table_[i] = Slot{id, node};
                 ++count_;
@@ -54,11 +72,13 @@ public:
             }
             assert(table_[i].id != id && "id reused while still resting");
         }
+        assert(false && "IdIndex::insert found no free slot");
     }
 
     bool erase(OrderId id) noexcept {
-        assert(id != kEmpty);
-        for (std::size_t i = home(id);; i = (i + 1) & mask_) {
+        if (id == kEmpty) return false;
+        std::size_t i = home(id);
+        for (std::size_t probes = 0; probes < table_.size(); ++probes, i = (i + 1) & mask_) {
             if (table_[i].id == kEmpty) return false;
             if (table_[i].id == id) {
                 erase_at(i);
@@ -66,10 +86,13 @@ public:
                 return true;
             }
         }
+        return false;
     }
 
     [[nodiscard]] std::size_t size()     const noexcept { return count_; }
-    [[nodiscard]] std::size_t capacity() const noexcept { return table_.size(); }
+    // NOTE the unit: SLOTS in the table, which is bit_ceil(orders * 2) — not the order
+    // count the constructor takes, and not what ObjectPool::capacity() means.
+    [[nodiscard]] std::size_t slot_count() const noexcept { return table_.size(); }
 
     // Tests and check_invariants(): count live entries by walking the table, so
     // the counter can be checked against the structure rather than trusted.

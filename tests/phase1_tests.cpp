@@ -1214,6 +1214,186 @@ std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
 
 } // namespace
 
+// ===========================================================================
+//  D25 — regressions for the pre-ship audit. One per demonstrated defect.
+//
+//  Every one of these FAILED before its fix. They are here because the previous
+//  audit's fixes introduced four of the nine, so "fixed" without "pinned" is how
+//  this set got written in the first place.
+// ===========================================================================
+
+TEST_CASE("an OrderType outside the enumerators is rejected, not executed", "[phase7][audit]") {
+    // D25.1. This was a null-pointer WRITE under NDEBUG: the value reserved no pool
+    // slot, skipped price validation, was not Market, and still reached the resting
+    // path. Reachable from scenario.hpp, which casts an integer straight off a log.
+    Engine     eng(kMin, kMax, 64);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    std::vector<Trade> out;
+
+    const OrderId id = eng.apply(NewOrder{.side = Side::Buy,
+                                          .type = static_cast<OrderType>(2),
+                                          .price = 100, .quantity = 10, .participant = 1}, out);
+
+    CHECK(id == Engine::kRejected);
+    CHECK(out.empty());
+    CHECK(eng.book().resting_count() == 0);
+    CHECK(eng.pool().in_use() == 0);
+    REQUIRE(eng.check_invariants());
+    REQUIRE(sink.events().size() == 1);
+    const auto* r = std::get_if<OrderRejected>(&sink.events()[0]);
+    REQUIRE(r != nullptr);
+    CHECK(r->reason == RejectReason::MalformedOrder);
+}
+
+TEST_CASE("a Side outside the enumerators is rejected", "[phase7][audit]") {
+    // D25.1. Less dangerous than the OrderType hole — every comparison is `== Buy`, so
+    // a stray value behaves consistently as Sell — but it still writes junk into the
+    // log, and the log is the artefact the replay test proves byte-identical.
+    Engine             eng(kMin, kMax, 64);
+    std::vector<Trade> out;
+    CHECK(eng.apply(NewOrder{.side = static_cast<Side>(7), .type = OrderType::Limit,
+                             .price = 100, .quantity = 10, .participant = 1}, out)
+          == Engine::kRejected);
+    CHECK(eng.book().resting_count() == 0);
+}
+
+TEST_CASE("a quantity above the cap is rejected before it can wrap a level total",
+          "[phase7][audit]") {
+    // D25.7. Two orders of 2^63 at one price wrapped PriceLevel's cached sum, and
+    // depth_at() then reported ZERO while 2^64 rested — with every invariant green,
+    // because is_consistent() recomputes the sum with the same wrapping arithmetic.
+    Engine             eng(kMin, kMax, 64);
+    std::vector<Trade> out;
+
+    REQUIRE(eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit, .price = 100,
+                               .quantity = kMaxQuantity, .participant = 1}, out)
+            != Engine::kRejected);
+    CHECK(eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit, .price = 100,
+                             .quantity = kMaxQuantity + 1, .participant = 1}, out)
+          == Engine::kRejected);
+
+    CHECK(eng.book().depth_at(100) == kMaxQuantity);   // exact, not wrapped
+    REQUIRE(eng.check_invariants());
+}
+
+TEST_CASE("a marketable limit still trades when the pool is exhausted", "[phase7][audit]") {
+    // D25.2. The F4 fix reserved a slot for EVERY limit order before matching, so at
+    // capacity this order was rejected — an order that consumes resting liquidity and
+    // frees slots, which is exactly what a full venue wants. The identical size sent as
+    // a Market order traded, which is what made it obviously wrong rather than arguable.
+    Engine             eng(kMin, kMax, 1);      // one slot, and the maker takes it
+    std::vector<Trade> out;
+
+    REQUIRE(eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit, .price = 100,
+                               .quantity = 5, .participant = 1}, out) != Engine::kRejected);
+    REQUIRE(eng.pool().in_use() == 1);          // pool is now full
+
+    out.clear();
+    const OrderId taker = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                             .price = 100, .quantity = 5, .participant = 2}, out);
+
+    CHECK(taker != Engine::kRejected);          // was kRejected before D25.2
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].quantity == 5);
+    CHECK(eng.book().resting_count() == 0);
+    CHECK(eng.pool().in_use() == 0);
+    REQUIRE(eng.check_invariants());
+}
+
+TEST_CASE("a remainder rests on a slot its own fill freed", "[phase7][audit]") {
+    // D25.2, second half. Letting the order through was not enough: cancelling its
+    // remainder would have been the same mistake one step later. A surviving remainder
+    // means every crossing maker was fully consumed, and retiring each returned its
+    // slot — so a slot is free by construction and the remainder can rest.
+    Engine     eng(kMin, kMax, 1);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    std::vector<Trade> out;
+
+    REQUIRE(eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit, .price = 100,
+                               .quantity = 3, .participant = 1}, out) != Engine::kRejected);
+    REQUIRE(eng.pool().in_use() == 1);
+
+    out.clear();
+    const OrderId taker = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                             .price = 100, .quantity = 5, .participant = 2}, out);
+
+    REQUIRE(taker != Engine::kRejected);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].quantity == 3);
+    CHECK(eng.book().resting_count() == 1);          // the remainder rested
+    CHECK(eng.book().depth_at(100) == 2);
+    CHECK(eng.pool().in_use() == 1);                 // the maker's slot, reused
+    REQUIRE(eng.check_invariants());
+
+    // No cancel was emitted: nothing was refused.
+    for (const Event& e : sink.events()) CHECK(!std::holds_alternative<OrderCancelled>(e));
+    CHECK(props::check_conservation(sink.events(), eng.book()).ok);
+}
+
+TEST_CASE("a fully filled limit returns the slot it reserved", "[phase7][audit]") {
+    // D25.4's guard on its ordinary path. The explicit release this replaced was
+    // correct; what it could not do was survive an exception out of fill().
+    Engine             eng(kMin, kMax, 8);
+    std::vector<Trade> out;
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit, .price = 100,
+                       .quantity = 4, .participant = 1}, out);
+    const std::size_t before = eng.pool().in_use();
+    out.clear();
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit, .price = 100,
+                       .quantity = 4, .participant = 2}, out);
+    CHECK(eng.pool().in_use() == before - 1);        // maker's freed, taker's returned
+    CHECK(eng.pool().free_list_is_consistent());
+}
+
+TEST_CASE("the book refuses id 0 rather than corrupting its index", "[phase7][audit]") {
+    // D25.8. IdIndex uses id 0 as its EMPTY marker and Engine::kRejected is also 0.
+    // add() validated the price unconditionally — citing D8's rule by name — and did
+    // not apply that rule to the id one line later. Under NDEBUG the slot was written,
+    // still read as empty, was never consumed, and count_ incremented anyway.
+    OrderBook book(kMin, kMax, 8);
+    Order     bad = make_order(0, Side::Buy, 101, 300, 1);
+    CHECK_THROWS_AS(book.add(&bad), std::invalid_argument);
+    CHECK(book.resting_count() == 0);
+    CHECK(book.is_consistent());
+}
+
+TEST_CASE("the book refuses to overfill its id index rather than probing forever",
+          "[phase7][audit]") {
+    // D25.9. The probe loops were `for(;;)`, terminating only because an empty slot
+    // always existed — guaranteed by an ASSERT on the load factor, which NDEBUG
+    // deletes. With a full table a lookup of a missing id spun forever, and a hang is
+    // the worst failure a trading process has: no crash, no core, no log.
+    OrderBook book(kMin, kMax, 2);        // IdIndex sized for 2 -> 4 slots
+    Order     a = make_order(1, Side::Buy, 101, 10, 1);
+    Order     b = make_order(2, Side::Buy, 102, 10, 2);
+    Order     c = make_order(3, Side::Buy, 103, 10, 3);
+
+    book.add(&a);
+    book.add(&b);
+    CHECK_THROWS_AS(book.add(&c), std::length_error);
+
+    CHECK(book.resting_count() == 2);     // refused before mutating anything
+    CHECK(book.is_consistent());
+    CHECK(book.find(999) == nullptr);     // and a miss TERMINATES
+}
+
+TEST_CASE("a const OrderBook yields a const Order", "[phase7][audit]") {
+    // D25.6, enforced by the type system rather than by a runtime check. find() used to
+    // return a mutable Order* from a const method, which made D23's const-only
+    // Engine::book() decorative — mutating o->price through it and then cancelling
+    // unlinked the order from a level that did not contain it.
+    Engine eng(kMin, kMax, 8);
+    static_assert(std::is_same_v<decltype(std::as_const(eng).book().find(OrderId{1})),
+                                 const Order*>,
+                  "const OrderBook::find must not hand out a mutable Order*");
+    static_assert(std::is_same_v<decltype(std::declval<OrderBook&>().find(OrderId{1})),
+                                 Order*>,
+                  "non-const OrderBook::find stays mutable for the engine's own use");
+    SUCCEED("checked at compile time");
+}
+
 TEST_CASE("conservation_holds_after_every_operation", "[phase7][fuzz]") {
     // Blueprint §9.2 asks for conservation after EVERY operation. It is O(log +
     // resting) per call, so the every-op version runs on a small stream and the
