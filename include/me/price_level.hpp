@@ -1,65 +1,106 @@
-// me/price_level.hpp — one price, FIFO by arrival. Phase 1.
+// me/price_level.hpp — one price, FIFO by arrival.
 //
-// ===========================================================================
-//  THE BODIES ARE YOURS. Signatures from Blueprint §3.5.
-// ===========================================================================
+// Intrusive doubly-linked list: prev/next live inside Order, so one order is
+// one object at one address, and holding an Order* IS holding its queue
+// position. That is what makes O(1) cancel possible from Phase 4.
 //
-// This is an INTRUSIVE doubly-linked list: the prev/next pointers live inside
-// Order itself, not in a separate node wrapper. Consequences:
-//   - no per-node allocation
-//   - one object = one memory location
-//   - holding an Order* IS holding its position in the container, which is what
-//     makes O(1) cancel possible once Phase 4 can find the order by id
-// The tax is that you own every pointer update by hand.
-//
-// WHY FIFO: time priority rewards showing your hand early and honestly. Without
-// it there is no incentive to be first in the queue and no penalty for
-// flickering quotes in and out. `entry_seq` IS the clock — there is no other.
-//
-// >>> THE ONE RULE THAT SAVES YOU A DEBUGGING WEEK (Blueprint §3.3) <<<
-// unlink() is a SINGLE AUDITED FUNCTION. Never inline pointer surgery into the
-// match loop, or cancel, or amend, or self-trade prevention. Every removal path
-// — fill-to-zero, cancel, amend-as-cancel-replace — goes through this one
-// function. Get the head/tail special cases wrong in one place instead of five.
+// Rationale in SYSTEM-DESIGN.md D9. .
 #pragma once
 
 #include "me/types.hpp"
+
+#include <cassert>
 
 namespace me {
 
 class PriceLevel {
 public:
     PriceLevel() = default;
-    explicit PriceLevel(Price p) : price_(p) {}
+    explicit PriceLevel(Price p) noexcept : price_(p) {}
 
-    // Arrival. Goes to the BACK (it is the newest). Maintains total_quantity_.
-    void push_back(Order* /*o*/) {
-        // TODO(you)
+    // Arrival: newest goes to the back. Precondition: o is in no other list.
+    void push_back(Order* o) noexcept {
+        assert(o != nullptr);
+
+        o->prev = tail_;
+        o->next = nullptr;
+
+        if (tail_ != nullptr) {
+            tail_->next = o;
+        } else {
+            head_ = o;                  // list was empty, so o is both ends
+        }
+        tail_ = o;
+
+        total_quantity_ += o->remaining;
     }
 
-    // O(1) removal. PRECONDITION: o is currently in THIS list.
-    // Handle: o is head, o is tail, o is both, o is neither.
-    void unlink(Order* /*o*/) {
-        // TODO(you)
+    // THE single audited removal path. Every caller that takes an order out of
+    // a level goes through here — fill-to-zero, cancel, amend, STP. Never
+    // inline this surgery anywhere else (Blueprint §3.3).
+    //
+    // Precondition: o is in THIS list, and o->remaining still holds the amount
+    // this level is counting. Subtracting happens here, so the caller must not
+    // zero remaining first — see D9.
+    void unlink(Order* o) noexcept {
+        assert(o != nullptr);
+        assert(total_quantity_ >= o->remaining);
+
+        if (o->prev != nullptr) {
+            o->prev->next = o->next;
+        } else {
+            head_ = o->next;            // o was the head
+        }
+
+        if (o->next != nullptr) {
+            o->next->prev = o->prev;
+        } else {
+            tail_ = o->prev;            // o was the tail
+        }
+
+        total_quantity_ -= o->remaining;
+
+        // Turns a use-after-unlink into a null dereference instead of a walk
+        // into a list this order is no longer part of.
+        o->prev = nullptr;
+        o->next = nullptr;
     }
 
-    // Oldest resting order, or nullptr when empty. Fills come off the head.
-    [[nodiscard]] Order* front() const noexcept {
-        return nullptr;   // TODO(you)
-    }
+    // Oldest resting order — fills come off the head, which is what makes time
+    // priority structural rather than a rule to enforce.
+    [[nodiscard]] Order* front() const noexcept { return head_; }
 
-    [[nodiscard]] bool empty() const noexcept {
-        return true;      // TODO(you)
-    }
+    [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }
 
-    // CACHED, never recomputed by walking the list — that walk is a pointer
-    // chase and this is read on every incoming order.
-    // Invariant: == sum of `remaining` over the list.
+    // Cached, never recomputed by walking: the walk is a pointer chase and this
+    // is read on every incoming order. Invariant: == sum of remaining.
     [[nodiscard]] Quantity total_quantity() const noexcept { return total_quantity_; }
 
     [[nodiscard]] Price price() const noexcept { return price_; }
-
     void set_price(Price p) noexcept { price_ = p; }
+
+    // O(n). Tests and Phase 4's check_invariants(), never the hot path.
+    // Checks: reachable both ways, entry_seq strictly increases head to tail
+    // (invariant 5), and the cached total matches the walk (invariant 4).
+    [[nodiscard]] bool is_consistent() const noexcept {
+        if (head_ == nullptr || tail_ == nullptr) {
+            return head_ == nullptr && tail_ == nullptr && total_quantity_ == 0;
+        }
+        if (head_->prev != nullptr || tail_->next != nullptr) {
+            return false;
+        }
+
+        Quantity   sum  = 0;
+        SeqNum     last = 0;
+        const Order* prev = nullptr;
+        for (const Order* o = head_; o != nullptr; prev = o, o = o->next) {
+            if (o->prev != prev)                    return false;   // back-link broken
+            if (prev != nullptr && o->entry_seq <= last) return false;   // FIFO violated
+            sum  += o->remaining;
+            last  = o->entry_seq;
+        }
+        return prev == tail_ && sum == total_quantity_;
+    }
 
 private:
     Order*   head_           = nullptr;

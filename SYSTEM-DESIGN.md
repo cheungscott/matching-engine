@@ -210,6 +210,39 @@ unpoison costs no second array and constrains `Order` only to "reserve 8 bytes s
 still lose on the merits; it was never weighed. Also: PR #1's body and D5 both cite verification
 on **g++ 13.3**, which does not exist in this environment (WSL has 11.4 only).
 
+### D9 - PriceLevel: intrusive FIFO, one audited removal path (Phase 1)
+**, 2026-09-01.**
+
+- **Chosen:** intrusive doubly-linked list, `prev`/`next` inside `Order`, plus a cached
+  `total_quantity_`. One order is one object at one address, so holding an `Order*` IS holding its
+  queue position - which is what makes O(1) cancel possible from Phase 4.
+- **`unlink()` is THE single removal path** (Blueprint §3.3). Every caller that takes an order out
+  of a level goes through it: fill-to-zero, cancel, amend, STP. Never inlined anywhere.
+- **Four cases, two branches.** Head / tail / both / neither are the 2x2 combination of two
+  independent questions - does `o` have a predecessor, does it have a successor. Writing four
+  explicit cases would be four places to get wrong instead of two.
+- **`unlink()` nulls `o->prev`/`o->next` on the way out.** Turns a use-after-unlink into an
+  immediate null dereference rather than a silent walk into a list the order has left.
+- **`total_quantity_` is cached, never recomputed.** The walk is a pointer chase and this is read
+  on every incoming order. Invariant 4: it equals the sum of `remaining`.
+
+> [!warning] Ordering precondition, and it is silent if broken
+> `unlink()` subtracts `o->remaining`, so **the caller must not zero `remaining` first.** Fill an
+> order, set `remaining = 0`, then unlink, and the level subtracts nothing: the cached total stays
+> permanently too high with no test failing and nothing for a sanitizer to see. Phase 2 adds
+> `reduce_front()` so that quantity changes and list changes each happen in one place.
+
+**Asserts rather than unconditional checks, and why that is consistent with D8.** The rule is
+*does removing the check turn a crash into silent corruption?* Without `assert(o != nullptr)` the
+next line dereferences null and the process dies at the point of the bug - loud and local.
+`assert(total_quantity_ >= o->remaining)` is the honest edge case: under NDEBUG the subtraction
+underflows into a huge plausible number. That is data corruption, not memory corruption, so assert
+is consistent - but it is a judgement call, and Phase 4's `check_invariants()` is the real net.
+
+**`is_consistent()`** (O(n), tests and Phase 4 only): ends agree, back-links coherent (a list can be
+walkable forwards and broken backwards - the classic intrusive bug), `entry_seq` strictly increasing
+head to tail (invariant 5), walked sum equals the cached total (invariant 4).
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
