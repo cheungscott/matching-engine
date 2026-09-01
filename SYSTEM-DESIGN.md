@@ -275,6 +275,42 @@ head to tail (invariant 5), walked sum equals the cached total (invariant 4).
 **`is_consistent()`** (O(range)): invariant 1 (uncrossed), invariant 3 (a live cursor points at a
 non-empty level), nothing rests strictly inside the spread, and every level's own `is_consistent()`.
 
+### D11 - Engine: match first, rest second (Phase 1)
+**, 2026-09-01.**
+
+- **`apply()` is validate, assign identity, then match-or-rest.** Never both in Phase 1: an exact
+  full fill consumes the incoming order entirely.
+- **Identity is assigned BEFORE matching.** A `Trade` carries `taker_id`, but a fully-filled taker
+  never becomes an `Order` at all - it never rests and never takes a pool slot. Its id exists only
+  on the trade.
+- **`kRejected = 0`.** `next_id_` starts at 1, so 0 is never a valid id and carries the second
+  meaning for free. Blueprint §5.1 specifies `std::expected<OrderId, RejectReason>`, which is
+  better because it names *why*; WSL's g++ 11.4 has no `std::expected`, so this is a deliberate
+  Phase 1 stand-in, replaced in Phase 3 when the reject path grows real reasons.
+- **`validate()` rejects quantity 0, non-Limit (Market is Phase 3), and out-of-range price.** That
+  last one exists *because of* the bounded array (Blueprint §5.1 `PriceOutOfRange`) - the array
+  design creates the reject reason.
+- **Pool exhaustion returns `kRejected`**, an honest bounded failure rather than an unbounded
+  allocation at peak load.
+
+**Two ordering rules inside `fill()`, both silent if broken:**
+
+1. **Unlink before anything zeroes `remaining`** - see D9. `unlink()` subtracts `o->remaining`.
+2. **Read everything needed from the maker BEFORE `pool_.release()`.** After release the slot is
+   poisoned and the pointer dead; any read is a use-after-poison. `price` is captured into a local
+   before the unlink/release sequence, then passed to `on_level_emptied()`.
+
+Sequence: emit trade -> capture price -> unlink -> notify book if level emptied -> release. Each
+step depends on the previous not having destroyed what it needs.
+
+**The trade prints at `maker->price`**, not the taker's - the resting order set the terms
+(Blueprint §4.2). Backwards here and every downstream P&L number is wrong.
+
+**The Phase 1 scope boundary is an assert**, `maker->remaining == cmd.quantity`. It makes the
+boundary loud rather than silently mis-filling. Under NDEBUG a mismatch would emit a trade for the
+maker's amount with the difference vanishing - data corruption, not memory corruption, so assert is
+consistent with D8. Temporary either way: Phase 2 makes the case legal and the assert goes.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)

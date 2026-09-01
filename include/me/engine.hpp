@@ -1,47 +1,28 @@
-// me/engine.hpp — match first, rest second. Phase 1.
+// me/engine.hpp — match first, rest second.
 //
-// ===========================================================================
-//  THE BODIES ARE YOURS.
-// ===========================================================================
+// The only component that decides anything. The book stores, the level orders,
+// the pool recycles; policy lives here.
 //
-// PHASE 1 SCOPE ONLY. Deliberately excluded, do not build them yet:
-//   - partial fills                      Phase 2
-//   - walking multiple price levels      Phase 3
-//   - market orders                      Phase 3
-//   - cancel                             Phase 4
-//   - amend                              Phase 5
-// Phase 1 is: rest on an empty book, and an EXACT full fill at ONE price.
+// PHASE 1 SCOPE. Partial fills are Phase 2, multi-level walks and market orders
+// Phase 3, cancel Phase 4. The boundary is enforced by an assert, not left to
+// silently do the wrong thing — see D11.
 //
-// THE TWO RULES THIS PHASE EXISTS TO ENCODE:
-//
-//   1. Trades print at the MAKER's price. The resting order set the terms; the
-//      aggressor accepted them. A buyer willing to pay 103 who meets an ask at
-//      102 trades at 102 and receives price improvement. Get this backwards and
-//      every downstream P&L number is wrong.
-//
-//   2. "At or better" INCLUDES EQUAL. An order priced exactly at the opposite
-//      best must TRADE, not rest. The strict-inequality version leaves a locked
-//      book, which is a missed trade, which is a correctness bug — not a market
-//      condition. This is the single most common student matching bug and it is
-//      one character wide.
-//
-// PROVISIONAL API, and knowingly so: trades go into a caller-owned vector.
-// Allocating per call would violate everything in Module 2, but Phase 1 is about
-// correctness and the vector is reused across calls by the caller. Phase 6
-// replaces this with a proper EventSink. Logged so it does not become permanent
-// by accident.
+// Rationale in SYSTEM-DESIGN.md D11. .
 #pragma once
 
 #include "me/object_pool.hpp"
 #include "me/order_book.hpp"
 #include "me/types.hpp"
 
+#include <cassert>
+#include <cstddef>
 #include <vector>
 
 namespace me {
 
-// A command arriving at the engine. Not the same thing as a resting Order:
-// this has no id and no queue position yet — the engine assigns those.
+// A command arriving from outside. NOT an Order: it has no id, no queue
+// position and no remaining — the engine assigns those, which is what stops a
+// client choosing its own place in the FIFO queue.
 struct NewOrder {
     Side          side{};
     OrderType     type{};
@@ -52,31 +33,93 @@ struct NewOrder {
 
 class Engine {
 public:
+    // 0 is never a valid order id, so it doubles as "rejected". Phase 3 replaces
+    // this with std::expected<OrderId, RejectReason>, which g++ 11 lacks.
+    static constexpr OrderId kRejected = 0;
+
     Engine(Price min_price, Price max_price, std::size_t pool_capacity)
         : book_(min_price, max_price), pool_(pool_capacity) {}
 
-    // Match what crosses, rest what remains. Appends any trades to `out`.
-    // Returns the engine-assigned id of the incoming order.
-    OrderId apply(const NewOrder& /*cmd*/, std::vector<Trade>& /*out*/) {
-        // TODO(you). The shape, in prose (Blueprint §4.2):
-        //   while the incoming order still has quantity
-        //     and the best opposite level CROSSES it:
-        //       fill against the FRONT of that level
-        //       print the trade at the RESTING order's price
-        //       a fully-filled resting order is unlinked and returned to the pool
-        //   whatever remains rests (Phase 1: it either fully filled, or it rests
-        //   untouched — no partial fills yet)
-        return 0;
+    // Match what crosses, rest what remains. Trades are appended to `out`.
+    // Returns the engine-assigned id, or kRejected.
+    OrderId apply(const NewOrder& cmd, std::vector<Trade>& out) {
+        if (!validate(cmd)) {
+            return kRejected;
+        }
+
+        const SeqNum  seq = next_seq_++;
+        const OrderId id  = next_id_++;
+
+        if (book_.crosses(cmd.side, cmd.price)) {
+            fill(cmd, id, seq, out);
+            return id;                      // fully filled; never rests
+        }
+
+        Order* resting = pool_.acquire();
+        if (resting == nullptr) {
+            return kRejected;               // pool exhausted: an honest bounded failure
+        }
+
+        resting->id          = id;
+        resting->side        = cmd.side;
+        resting->type        = cmd.type;
+        resting->price       = cmd.price;
+        resting->quantity    = cmd.quantity;
+        resting->remaining   = cmd.quantity;
+        resting->entry_seq   = seq;
+        resting->participant = cmd.participant;
+
+        book_.add(resting);
+        return id;
     }
 
     [[nodiscard]] OrderBook&       book()       noexcept { return book_; }
     [[nodiscard]] const OrderBook& book() const noexcept { return book_; }
+    [[nodiscard]] const ObjectPool<Order>& pool() const noexcept { return pool_; }
 
 private:
-    OrderBook        book_;
+    [[nodiscard]] bool validate(const NewOrder& cmd) const noexcept {
+        if (cmd.quantity == 0)             return false;
+        if (cmd.type != OrderType::Limit)  return false;   // Market is Phase 3
+        if (!book_.in_range(cmd.price))    return false;   // the bounded-array reject
+        return true;
+    }
+
+    // Phase 1: exactly one resting order, at one price, for the whole quantity.
+    void fill(const NewOrder& cmd, OrderId taker_id, SeqNum seq, std::vector<Trade>& out) {
+        const Side  opposite = (cmd.side == Side::Buy) ? Side::Sell : Side::Buy;
+        PriceLevel* level    = book_.best_level(opposite);
+        assert(level != nullptr && "crosses() said there was liquidity");
+
+        Order* maker = level->front();
+        assert(maker != nullptr && "occupied cursor pointing at an empty level");
+        assert(maker->remaining == cmd.quantity &&
+               "Phase 1 handles exact full fills only; partial fills are Phase 2");
+
+        // At the MAKER's price. The resting order set the terms; the aggressor
+        // accepted them, so the taker may receive price improvement.
+        out.push_back(Trade{
+            .seq      = seq,
+            .maker_id = maker->id,
+            .taker_id = taker_id,
+            .price    = maker->price,
+            .quantity = maker->remaining,
+        });
+
+        // Order matters: unlink subtracts maker->remaining from the level's
+        // cached total, so remaining must still be intact here (D9).
+        const Price price = maker->price;
+        level->unlink(maker);
+        if (level->empty()) {
+            book_.on_level_emptied(opposite, price);
+        }
+        pool_.release(maker);
+    }
+
+    OrderBook         book_;
     ObjectPool<Order> pool_;
-    SeqNum           next_seq_ = 1;   // arrival order == time priority
-    OrderId          next_id_  = 1;
+    SeqNum            next_seq_ = 1;    // arrival order IS time priority
+    OrderId           next_id_  = 1;    // 0 reserved for kRejected
 };
 
 } // namespace me
