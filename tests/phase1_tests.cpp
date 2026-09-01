@@ -1079,13 +1079,31 @@ std::vector<scenario::Command> make_stream(unsigned seed, int ops) {
     std::uniform_int_distribution<int> roll(0, 99);
 
     std::vector<scenario::Command> cmds;
+    std::vector<OrderId>           limit_ids;   // ids that could plausibly still rest
     OrderId next_expected_id = 1;
 
     for (int i = 0; i < ops; ++i) {
         const int r = roll(rng);
         if (r < 20 && next_expected_id > 1) {
-            std::uniform_int_distribution<unsigned long long> pick(1, next_expected_id - 1);
-            cmds.emplace_back(Cancel{.id = static_cast<OrderId>(pick(rng))});
+            // Drawing uniformly over every id ever issued makes most cancels miss, so the
+            // path with the most engine work in it (index lookup, unlink, index erase, pool
+            // release, possible cursor advance) is the least exercised. Real cancels target
+            // recent quotes, so 85% of picks come from the 128 most recent limit-order ids.
+            //
+            // Only LIMIT ids are targeted: market orders (about 6% of this stream) never rest,
+            // so a cancel aimed at one is guaranteed to miss. The other 15% of picks draw
+            // uniformly over every id issued, so the miss path stays covered.
+            OrderId id = 0;
+            if (!limit_ids.empty() && roll(rng) < 85) {
+                const std::size_t window = std::min<std::size_t>(limit_ids.size(), 128);
+                std::uniform_int_distribution<std::size_t> pick(limit_ids.size() - window,
+                                                                limit_ids.size() - 1);
+                id = limit_ids[pick(rng)];
+            } else {
+                std::uniform_int_distribution<unsigned long long> pick(1, next_expected_id - 1);
+                id = static_cast<OrderId>(pick(rng));
+            }
+            cmds.emplace_back(Cancel{.id = id});
         } else {
             cmds.emplace_back(NewOrder{
                 .side        = (r % 2 == 0) ? Side::Buy : Side::Sell,
@@ -1094,6 +1112,9 @@ std::vector<scenario::Command> make_stream(unsigned seed, int ops) {
                 .quantity    = static_cast<Quantity>(qty_of(rng)),
                 .participant = 1,
             });
+            if (std::get<NewOrder>(cmds.back()).type == OrderType::Limit) {
+                limit_ids.push_back(next_expected_id);
+            }
             ++next_expected_id;
         }
     }
@@ -1101,6 +1122,50 @@ std::vector<scenario::Command> make_stream(unsigned seed, int ops) {
 }
 
 } // namespace
+
+TEST_CASE("the log's text format is pinned, field by field", "[phase6][replay]") {
+    // The other replay tests compare to_line's output only against itself, so on their own
+    // they stay green even if the format drops fields entirely. The log is the artefact
+    // the project calls "the truth", so its shape is pinned here.
+    CHECK(to_line(OrderAccepted{.seq = 1, .id = 2, .side = Side::Sell,
+                                .type = OrderType::Limit, .price = 100, .quantity = 10})
+          == "ACC 1 2 1 0 100 10");
+    CHECK(to_line(OrderAccepted{.seq = 3, .id = 4, .side = Side::Buy,
+                                .type = OrderType::Market, .price = 0, .quantity = 7})
+          == "ACC 3 4 0 1 0 7");
+    CHECK(to_line(TradeExecuted{.seq = 5, .maker_id = 2, .taker_id = 4,
+                                .price = 100, .quantity = 7}) == "TRD 5 2 4 100 7");
+    CHECK(to_line(OrderCancelled{.seq = 6, .id = 2,
+                                 .reason = CancelReason::UserRequested}) == "CXL 6 2 0");
+    CHECK(to_line(OrderRejected{.seq = 7, .reason = RejectReason::UnknownOrder})
+          == "REJ 7 3");
+
+    // Negative prices must survive the round trip: the tick window is signed.
+    CHECK(to_line(TradeExecuted{.seq = 8, .maker_id = 1, .taker_id = 2,
+                                .price = -5, .quantity = 1}) == "TRD 8 1 2 -5 1");
+}
+
+TEST_CASE("two market orders differing only in junk price log identically",
+          "[phase6][replay]") {
+    // The engine normalises a market order's meaningless price to 0 so that behaviourally
+    // identical orders produce byte-identical logs. Only two streams that differ in the
+    // junk price can see that normalisation go missing: the other replay tests compare
+    // a stream against ITSELF, which any consistent format
+    // satisfies.
+    auto log_with = [](Price junk) {
+        Engine     eng(kMin, kMax, 16);
+        VectorSink sink;
+        eng.set_sink(&sink);
+        std::vector<Trade> out;
+        eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                           .price = 100, .quantity = 10, .participant = 1}, out);
+        eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+                           .price = junk, .quantity = 4, .participant = 2}, out);
+        return to_log(sink.events());
+    };
+    CHECK(log_with(0) == log_with(107));
+    CHECK(log_with(0) == log_with(-99));
+}
 
 TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
     Engine eng(kMin, kMax, 64);
@@ -1117,8 +1182,13 @@ TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
     eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 999, .quantity = 10, .participant = 3}, trades);  // out of range
 
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 100, .quantity = 0, .participant = 3}, trades);   // qty 0
+    eng.apply(NewOrder{.side = Side::Buy, .type = static_cast<OrderType>(9),
+                       .price = 100, .quantity = 5, .participant = 3}, trades);   // malformed
+
     const auto& ev = sink.events();
-    REQUIRE(ev.size() == 6);
+    REQUIRE(ev.size() == 8);
     CHECK(std::holds_alternative<OrderAccepted>(ev[0]));    // the maker
     CHECK(std::holds_alternative<OrderAccepted>(ev[1]));    // the taker
     CHECK(std::holds_alternative<TradeExecuted>(ev[2]));    // partial fill, maker stays
@@ -1131,6 +1201,18 @@ TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
     CHECK(std::get<OrderRejected>(ev[4]).reason == RejectReason::UnknownOrder);
     CHECK(std::get<OrderRejected>(ev[5]).reason == RejectReason::PriceOutOfRange);
     CHECK(std::get<OrderAccepted>(ev[0]).id == maker);
+
+    // Neither InvalidQuantity nor MalformedOrder is reachable from any fuzz stream: every
+    // generator draws valid quantities, sides and order types. Both reject branches are
+    // planted here directly.
+    CHECK(std::get<OrderRejected>(ev[6]).reason == RejectReason::InvalidQuantity);
+    CHECK(std::get<OrderRejected>(ev[7]).reason == RejectReason::MalformedOrder);
+
+    // Rejections consume no order id: four precede this order, so its id must still be
+    // maker + 2.
+    const OrderId after = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                             .price = 95, .quantity = 5, .participant = 4}, trades);
+    CHECK(after == maker + 2);
 }
 
 TEST_CASE("market_remainder_is_cancelled_with_no_liquidity", "[phase6][events]") {
@@ -1238,6 +1320,69 @@ std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
 }
 
 } // namespace
+
+TEST_CASE("the fuzz generator actually exercises the cancel-hit path", "[phase7][audit]") {
+    // A generator that draws cancel ids uniformly over every id ever issued makes most
+    // cancels miss, which leaves the most expensive path in the engine (index lookup,
+    // unlink, index erase, pool release, cursor advance) the least exercised. A green
+    // run says nothing about that, so the hit rate is pinned here and cannot drift down
+    // silently.
+    Engine             eng(kMin, kMax, 4096);
+    const auto         cmds = make_stream(20260907u, 20'000);
+    std::vector<Trade> out;
+    std::size_t        hits = 0, cancels = 0;
+
+    for (const auto& c : cmds) {
+        out.clear();
+        if (const auto* n = std::get_if<NewOrder>(&c)) { eng.apply(*n, out); }
+        else { ++cancels; hits += eng.apply(*std::get_if<Cancel>(&c)) ? 1u : 0u; }
+    }
+
+    REQUIRE(cancels > 1'000);
+    INFO("cancel hit rate " << hits << "/" << cancels);
+
+    // Measured 805/4046 = 19.9% on this seed. Not higher, and deliberately not
+    // forced higher: prices are drawn from a 7-tick band so most limit orders cross
+    // and fill immediately rather than resting. Widening the band would raise this
+    // number by making the market stop crossing, which would buy a better statistic
+    // by testing a less interesting book. The threshold sits below the measured value
+    // with margin, so it catches a regression without pinning RNG behaviour exactly.
+    CHECK(hits * 100 >= cancels * 15);
+}
+
+TEST_CASE("the guards that exist to prevent corruption are themselves tested",
+          "[phase7][audit]") {
+    // Every one of these throws stops an out-of-bounds write or an overflow. A guard
+    // nobody exercises is indistinguishable from a guard that does not work.
+    SECTION("add() refuses a price outside the tick window") {
+        OrderBook book(kMin, kMax, 8);
+        Order     o = make_order(1, Side::Buy, kMax + 100, 10, 1);
+        CHECK_THROWS_AS(book.add(&o), std::out_of_range);
+        CHECK(book.resting_count() == 0);
+    }
+    SECTION("checked_span refuses an inverted window") {
+        CHECK_THROWS_AS(OrderBook(200, 100, 8), std::invalid_argument);
+    }
+    SECTION("checked_span refuses a window touching the limits of Price") {
+        CHECK_THROWS_AS(OrderBook(std::numeric_limits<Price>::min(), 0, 8),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(OrderBook(0, std::numeric_limits<Price>::max(), 8),
+                        std::invalid_argument);
+    }
+    SECTION("checked_span survives a span that overflows int32") {
+        // (-2e9, 2e9) overflows `max_price - min_price` in int32 arithmetic. It must
+        // throw a clean invalid_argument, not wrap into a small positive span.
+        CHECK_THROWS_AS(OrderBook(-2'000'000'000, 2'000'000'000, 8), std::invalid_argument);
+    }
+    SECTION("the pool refuses a capacity beyond its index space") {
+        CHECK_THROWS_AS(ObjectPool<Order>(std::size_t{1} << 40), std::length_error);
+    }
+    SECTION("max_trades_per_apply reports the pool's bound") {
+        // At most `capacity` orders rest, so one apply() makes at most `capacity` trades.
+        Engine eng(kMin, kMax, 1024);
+        CHECK(eng.max_trades_per_apply() == 1024);
+    }
+}
 
 // ===========================================================================
 //  Planted violations for the INVARIANT checkers.
@@ -1519,7 +1664,13 @@ TEST_CASE("every remaining check() branch has a planted violation", "[phase7][pl
         expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10),
                       acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10),
                       cxl(3, 1),
-                      trd(4, 1, 2, 100, 5)}, "cancelled order traded again");
+                      trd(4, 1, 2, 100, 5)}, "cancelled order traded again as maker");
+    }
+    SECTION("a cancelled order traded again, as the taker") {
+        expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10),
+                      acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10),
+                      cxl(3, 2),
+                      trd(4, 1, 2, 100, 5)}, "cancelled order traded again as taker");
     }
     SECTION("maker filled beyond its original quantity") {
         expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 5),
@@ -1971,6 +2122,13 @@ TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][ph
             const auto c = props::check_conservation(sink.events(), real.book());
             INFO(c.why);
             REQUIRE(c.ok);
+            // The depth sweep runs inside the loop so a quantity leak at a non-best level
+            // is localised to a 5,000-operation window. The two small differentials
+            // compare depth every operation; at 100k that is too slow, so here it rides
+            // along with the conservation checkpoint.
+            for (Price p = kMin; p <= kMax; ++p) {
+                REQUIRE(real.book().depth_at(p) == ref.depth_at(p));
+            }
         }
     }
 
@@ -2045,7 +2203,11 @@ TEST_CASE("the_shrinker_reduces_a_failing_stream", "[.gate][phase7][fuzz]") {
     REQUIRE(has_trade_at_100(cmds));
     const auto small = me::shrink::minimise(cmds, has_trade_at_100);
 
-    CHECK(has_trade_at_100(small));            // still reproduces
-    CHECK(small.size() < cmds.size() / 10);    // and is drastically smaller
     INFO("shrank " << cmds.size() << " commands to " << small.size());
+    CHECK(has_trade_at_100(small));            // still reproduces — the real property
+
+    // On this stream the shrinker returns TWO commands. A trade needs a resting order and
+    // an order that crosses it, so 2 is the floor. The bound is tight on purpose: a loose
+    // one such as `< cmds.size() / 10` would also pass a "keep the first K commands" stub.
+    CHECK(small.size() <= 4);
 }
