@@ -593,6 +593,81 @@ the default run *and* from `catch_discover_tests`, so `ctest` skips it too.
 save. This is the same reasoning as the Debug/Bench split: the expensive check earns its keep at a
 boundary, not in the inner loop.
 
+### D17 - The benchmark rig, and the clock that could not measure it (Phase 10a)
+**, 2026-09-01.**
+
+`bench/latency.cpp`, built only under `CMAKE_BUILD_TYPE=Bench`.
+
+> [!warning] The finding that shaped the file
+> The first version timed each operation with `std::chrono::steady_clock`. Every result came back a
+> multiple of 100ns - p50=100, p90=200, p99=300 - and the measured "clock overhead" was 0.
+> **`steady_clock` here has ~99ns granularity, and an engine operation is faster than that.** Timing
+> one operation with it yields 0 or 100 and nothing in between: quantisation dressed up as a
+> percentile.
+>
+> Granularity is a more dangerous problem than overhead. **Overhead shifts a number; granularity
+> invents one.** The rig reported plausible-looking percentiles that were pure artefact, and it
+> would have been entirely possible to put them on a CV.
+
+**The measured path now uses the CPU timestamp counter**, `rdtscp` plus `lfence`. `rdtscp` waits for
+earlier instructions to retire and the fence stops later ones being hoisted above it - without both,
+out-of-order execution moves work across the measurement boundary and the sample is of the wrong
+thing. `steady_clock` is kept only to calibrate the TSC and to time whole runs.
+
+**The TSC rate is measured, not assumed** (2.9040 cycles/ns here). Nominal clock speed is not the
+TSC rate on every machine, and guessing would put a systematic error into every number.
+
+### Deviation from Blueprint §8: no HdrHistogram
+
+The Blueprint specifies HdrHistogram. This stores raw cycle counts in a **pre-reserved** vector and
+sorts afterwards. HdrHistogram's advantages are bounded memory and no allocation while recording;
+for a fixed 200k-sample run a reserved vector also allocates nothing on the recording path, and
+sorting gives **exact** percentiles rather than bucketed ones. No dependency, one fewer thing to
+pin. Revisit if a run ever needs unbounded duration.
+
+### What the rig refuses to do
+
+Verified, both paths:
+
+- **Built with a sanitizer → exits 2.** ASan costs ~2x; a number measured under it is inflated and
+  unreproducible.
+- **Built without `NDEBUG` → exits 2.** Assertions on the measured path are not the code that ships.
+
+This is D4's build-type discipline made *unbypassable from the other direction*: the config cannot
+produce a wrong number by accident, and neither can a hand-rolled compile.
+
+### Methodology it reports about itself
+
+Compiler, build type, run count, warm-up size, workload shape, `steady_clock` granularity, measured
+TSC rate, and the **timer floor** - the median of an empty measurement, ~29 cycles (~10ns) here.
+Anything at or below the floor is the rig measuring itself. Stating it is what lets a reader tell a
+real 74ns from noise.
+
+Results are broken out **by operation kind** rather than blended, because resting is a pointer bump
+and a sweep is a walk, and one number hides which is which.
+
+### First numbers - NOT for the CV yet
+
+WSL2, g++ 11.4, `-O2 -DNDEBUG`, 5 runs x 200k measured operations, warm.
+
+| Operation | p50 | p99 | p99.9 |
+|---|---|---|---|
+| all | 74 ns | 274 ns | 524 ns |
+| add, rested | 73 ns | 187 ns | 456 ns |
+| add, traded | 88 ns | 311 ns | 559 ns |
+| **cancel, hit** | **178 ns** | **510 ns** | 779 ns |
+| cancel, unknown | 58 ns | 206 ns | 447 ns |
+
+Throughput: median 9.17 M ops/sec.
+
+**Caveats that travel with these numbers:** WSL2 is a VM, an isolated pinned core is not achievable
+from inside a guest, and `max` reached 1.0 ms - which is the hypervisor, not the engine. p50 is
+meaningful; the far tail is contaminated. Do not quote these as pinned-core figures.
+
+**The Phase 10b lead is already visible:** `cancel, hit` is 2.4x the cost of resting an order, and
+cancels are the message type that dominates real flow. That is where the profiler should be pointed
+first - and it is a hypothesis to test, not a conclusion.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)

@@ -97,8 +97,11 @@ target_link_libraries(phase1_tests PRIVATE me_engine Catch2::Catch2WithMain)
 target_include_directories(phase1_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 catch_discover_tests(phase1_tests)
 
-# Benchmarks never link a sanitizer; guard against being built in Debug by mistake.
+# ---- Benchmarks ------------------------------------------------------------
+# Bench ONLY. The binary itself also refuses to run under a sanitizer or with
+# assertions enabled, so a wrong number cannot be produced by accident from
+# either direction (D17).
 if(CMAKE_BUILD_TYPE STREQUAL "Bench")
-  # add_executable(bench bench/latency.cpp)   # Phase 10
-  # target_link_libraries(bench PRIVATE me_engine)
+  add_executable(bench_latency bench/latency.cpp)
+  target_link_libraries(bench_latency PRIVATE me_engine)
 endif()
