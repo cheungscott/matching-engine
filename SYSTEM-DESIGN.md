@@ -516,6 +516,83 @@ when to spend a day on it.
 engine produces 6. The engine was right - accept, accept, trade, cancel, reject, reject - and the
 test's arithmetic was wrong.
 
+### D16 - Property tests and the oracle fuzz, without RapidCheck (Phase 7)
+**, 2026-09-01.**
+
+> [!note] Divergence from Blueprint §11, deliberate
+> Phase 7 specifies **RapidCheck**. This uses a seeded generator plus a hand-written shrinker
+> instead. Three reasons:
+> 1. The Blueprint's own `FetchContent` snippet pins RapidCheck to **`GIT_TAG master`** - a floating
+>    tag, which directly contradicts the discipline already applied to Catch2 (pinned at `v3.5.2`
+>    precisely because a floating tag makes builds unreproducible). Pinning it to a commit is
+>    possible, but it is a new dependency taken on during ship week.
+> 2. **What RapidCheck actually buys over a seeded loop is shrinking**, and that is replaced by
+>    `tests/shrink.hpp` - a 30-line delete-chunk minimiser, which has its own test.
+> 3. The generator already exists. Phase 6's scenario stream is deterministic, replayable, and
+>    serialisable to text.
+>
+> **Revisit trigger:** after v0.1, if the shrinker proves inadequate on a real failure. It only
+> deletes commands; it never simplifies one, so a bug needing a *smaller quantity* rather than
+> *fewer commands* will not reduce well.
+
+### Properties are checked against the LOG, not the book
+
+`tests/properties.hpp` takes a `std::vector<Event>` and nothing else.
+
+That is the payoff of "the log is the truth". A book can satisfy every one of its own invariants and
+still emit an illegal trade - the invariants describe the book's internal consistency, not whether
+the market it produced makes sense. Checking the log instead means the properties are independent of
+the implementation, and would still hold against a completely different engine.
+
+Four families, all verified in one ordered pass:
+
+- **Legality.** No zero-quantity trade; price inside the tick window; a trade has two distinct
+  orders on opposite sides; **the print is exactly at the maker's accepted price**; a limit taker
+  never pays above or receives below its own limit; a market order never rested as a maker.
+- **Conservation.** No order is ever filled beyond its accepted quantity, checked incrementally so
+  the violating trade is identified rather than just the total.
+- **Cancelled never matches.** Order matters here: it is a statement about what follows a cancel,
+  not about the set of cancelled ids, which is why the check walks the log in sequence.
+- **Structural.** No id reused, no zero-quantity order accepted.
+
+### Scale, split by cost
+
+- **1,000,000 operations, properties only.** Cheap because it is one pass over the log with no
+  per-operation O(range) walk. This is the Blueprint's 10⁶ accept criterion.
+- **100,000 operations, differential + all seven invariants after every operation.** Expensive by
+  construction; this is the one that would catch a book which is internally inconsistent in a way
+  the log does not reveal.
+
+Two mechanisms, deliberately: the log-based properties catch an engine that lies about what
+happened, the invariant walk catches an engine whose internals rot while the log stays plausible.
+
+### The meta-test
+
+**A checker that never fails proves nothing**, and a million-operation run that can only return
+`true` is an expensive way of computing `true`. So four violations are planted into a known-good log
+- a trade off the maker's price, an over-fill, an unknown maker, and a cancelled order trading
+afterwards - and each must be caught. The shrinker gets the same treatment: reduce a 4,000-command
+stream and assert the result still reproduces and is an order of magnitude smaller.
+
+### Runtime split - measured, and it forced a change
+
+The gate runs in **3m47s** under ASan. That cannot sit in the suite you run while working: a
+test suite you stop running because it is slow protects nothing, so the slowness would have cost
+more than the coverage bought.
+
+The three heavy cases are tagged **`[.gate]`**. A Catch2 tag beginning with `.` hides the case from
+the default run *and* from `catch_discover_tests`, so `ctest` skips it too.
+
+| Command | Covers | Time |
+|---|---|---|
+| `./build/phase1_tests` | 60 cases, 151,847 assertions | **1.2s** |
+| `ctest --test-dir build` | same, one process per case | 11.6s |
+| `./build/phase1_tests "[gate]"` | 1.1M operations, 763,611 assertions | **3m47s** |
+
+**Run the gate before every commit that touches matching logic, and before the ship.** Not on every
+save. This is the same reasoning as the Debug/Bench split: the expensive check earns its keep at a
+boundary, not in the inner loop.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
