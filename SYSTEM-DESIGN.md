@@ -454,6 +454,68 @@ the index's bugs, because it has no index.
 3000 operations mixing limits, markets and cancels, with all seven invariants checked after every
 one: ~85,000 assertions, zero diffs.
 
+### D15 - Sequenced event log and replay (Phase 6)
+**, 2026-09-01.**
+
+**Events** (`include/me/events.hpp`): `OrderAccepted`, `OrderRejected`, `TradeExecuted`,
+`OrderCancelled`, as a `std::variant`. `OrderAmended` is absent because Phase 5 is cut.
+`RejectReason` and `CancelReason` are enums, so a reject finally says *why* - which is what
+Blueprint §5.1 wanted `std::expected` for, arriving here through a different door.
+
+**`validate()` now returns `std::optional<RejectReason>`** rather than a bool. Same check, but the
+outcome carries a reason the event can record.
+
+**`EventSink`**, with a null default. The engine publishes if a sink is attached and does nothing
+otherwise, which is why all 53 pre-Phase-6 tests were unaffected. `VectorSink` collects in memory.
+
+> [!note] Transitional shape, deliberately
+> `apply()` still fills a `std::vector<Trade>&` *and* publishes to the sink. The end state is
+> sink-only - the log is the truth - but changing the signature would have rewritten every existing
+> test for no behavioural gain during ship week. The trade vector is test ergonomics; the sink is
+> the real output. Unify after v0.1.
+
+### Why the log format is what it is
+
+One line per event, fixed field order, **integers only**. That is a determinism requirement, not
+cosmetics, because this text is what the replay test diffs byte for byte:
+
+- **No floats.** Their formatting is locale- and implementation-dependent, so the same run could
+  produce different text on a different machine.
+- **No addresses**, which vary per run under ASLR.
+- **No timestamps.** Latency is physical and never deterministic; the moment a clock reaches the log
+  the diff becomes noise. `seq` is the only notion of time, and it is a counter.
+- **No hash-order iteration.** `by_id_` is an `unordered_map`, and its iteration order is not
+  guaranteed stable - nothing in the log may be derived from walking it.
+
+### Scenarios - `tests/scenario.hpp`
+
+The **input** log, as text: one command per line, integers only. Same shape a NASDAQ ITCH or LOBSTER
+day reduces to, which is the on-ramp Blueprint §6.2 mentions. Designing for it now cost nothing.
+
+Determinism is the claim that the input log determines the output log, so both need a stable text
+form before it can be tested at all.
+
+### What is actually verified
+
+- **~10,000 commands, two fresh engines, byte-identical logs.** The whole claim of the design in
+  one assertion.
+- **Round-trip:** commands to text to commands produces identical text, and the reconstructed
+  commands produce the identical event log.
+- **Sequence numbers strictly increase** across ~2,000 mixed operations. `seq` *is* the order, so a
+  repeat or a gap would make the log's central promise false.
+- **A negative test.** One extra command must change the log, and the old log must remain a prefix
+  of the new one. A replay test that passes no matter what is worthless, and append-only is checked
+  rather than assumed.
+
+**Trimmed, per the pre-committed ladder:** the existing 53 tests were NOT backfilled as scenario
+files. The replay property is proven by generated streams instead, which is the part that carries
+the guarantee; converting hand-written tests to data files is presentation, and ship week is not
+when to spend a day on it.
+
+**Found while writing this:** the first version of the event test asserted 7 events where the
+engine produces 6. The engine was right - accept, accept, trade, cancel, reject, reject - and the
+test's arithmetic was wrong.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
