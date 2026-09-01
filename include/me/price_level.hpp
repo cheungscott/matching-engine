@@ -66,6 +66,21 @@ public:
         o->next = nullptr;
     }
 
+    // Partially fill the head in place. It KEEPS its queue position — it did
+    // nothing to deserve losing it.
+    //
+    // This exists so quantity changes and list changes each happen in exactly
+    // one place: a full consumption goes through unlink(), never through here,
+    // which is what removes D9's ordering trap.
+    void reduce_front(Quantity qty) noexcept {
+        assert(head_ != nullptr);
+        assert(qty > 0 && qty < head_->remaining &&
+               "full consumption goes through unlink(), not reduce_front()");
+
+        head_->remaining -= qty;
+        total_quantity_  -= qty;
+    }
+
     // Oldest resting order — fills come off the head, which is what makes time
     // priority structural rather than a rule to enforce.
     [[nodiscard]] Order* front() const noexcept { return head_; }

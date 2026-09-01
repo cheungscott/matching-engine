@@ -311,6 +311,36 @@ boundary loud rather than silently mis-filling. Under NDEBUG a mismatch would em
 maker's amount with the difference vanishing - data corruption, not memory corruption, so assert is
 consistent with D8. Temporary either way: Phase 2 makes the case legal and the assert goes.
 
+### D12 - Partial fills: reduce_front, and one place per kind of change (Phase 2)
+**, 2026-09-01.**
+
+**`PriceLevel::reduce_front(qty)`** fills the head in place and leaves it at the head. It asserts
+`qty < head_->remaining`, so a **full** consumption cannot come through here - that path is
+`unlink()`. Two mutually exclusive routes, each maintaining the cached total exactly once.
+
+That is what **retires D9's ordering trap**. The caller no longer has any reason to touch
+`remaining` directly, so there is no longer an ordering to get wrong.
+
+**Queue-position rules, straight from Module 1:**
+
+- A **partially filled resting** order keeps its position - it did nothing to deserve losing it.
+- A **partially filled incoming** order rests its remainder at its own price, at the **back** of
+  that level, because there it is a new arrival.
+
+**Sequence numbers.** Each trade takes its own `next_seq_++`, so the event log records fill order
+within a level and `trades[0].seq < trades[1].seq` is a testable property. A resting order's
+`entry_seq` is the sequence of its *arrival*, which is what keeps FIFO comparisons between orders
+meaningful even though trades consume numbers from the same counter.
+
+**Phase 2 boundary, enforced not documented:** `assert(level->price() == first_best)`. The fill loop
+is written in its general form, but walking to a second price level is Phase 3 - which also brings
+market orders and, importantly, the `NaiveBook` oracle. Blueprint §2's risk ordering is that the
+harder matching work should land *with* the differential test, not before it. Phase 3 deletes this
+assert.
+
+**Still an assert rather than unconditional**, consistent with D8: under NDEBUG a walk would produce
+a wrong fill, which is data corruption rather than memory corruption.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
