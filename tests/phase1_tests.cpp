@@ -24,6 +24,7 @@
 #include "me/types.hpp"
 
 #include "naive_book.hpp"
+#include "scenario.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -1034,4 +1035,150 @@ TEST_CASE("differential_with_cancels", "[phase4][oracle]") {
         }
         REQUIRE(real.check_invariants());       // all seven, after every operation
     }
+}
+
+// ===========================================================================
+//  PHASE 6 — sequenced event log and replay
+// ===========================================================================
+
+namespace {
+
+// A deterministic command stream. Fixed seed, so a failure is reproducible
+// rather than a story about a run that once went wrong.
+std::vector<scenario::Command> make_stream(unsigned seed, int ops) {
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> price_of(98, 104);
+    std::uniform_int_distribution<int> qty_of(1, 200);
+    std::uniform_int_distribution<int> roll(0, 99);
+
+    std::vector<scenario::Command> cmds;
+    OrderId next_expected_id = 1;
+
+    for (int i = 0; i < ops; ++i) {
+        const int r = roll(rng);
+        if (r < 20 && next_expected_id > 1) {
+            std::uniform_int_distribution<unsigned long long> pick(1, next_expected_id - 1);
+            cmds.emplace_back(Cancel{.id = static_cast<OrderId>(pick(rng))});
+        } else {
+            cmds.emplace_back(NewOrder{
+                .side        = (r % 2 == 0) ? Side::Buy : Side::Sell,
+                .type        = (r < 26) ? OrderType::Market : OrderType::Limit,
+                .price       = static_cast<Price>(price_of(rng)),
+                .quantity    = static_cast<Quantity>(qty_of(rng)),
+                .participant = 1,
+            });
+            ++next_expected_id;
+        }
+    }
+    return cmds;
+}
+
+} // namespace
+
+TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
+    Engine eng(kMin, kMax, 64);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    std::vector<Trade> trades;
+
+    const OrderId maker = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                             .price = 102, .quantity = 100, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 40, .participant = 2}, trades);
+    eng.apply(Cancel{.id = maker});
+    eng.apply(Cancel{.id = 9999});                                   // unknown
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 999, .quantity = 10, .participant = 3}, trades);  // out of range
+
+    const auto& ev = sink.events();
+    REQUIRE(ev.size() == 6);
+    CHECK(std::holds_alternative<OrderAccepted>(ev[0]));    // the maker
+    CHECK(std::holds_alternative<OrderAccepted>(ev[1]));    // the taker
+    CHECK(std::holds_alternative<TradeExecuted>(ev[2]));    // partial fill, maker stays
+    CHECK(std::holds_alternative<OrderCancelled>(ev[3]));   // maker cancelled
+    CHECK(std::holds_alternative<OrderRejected>(ev[4]));    // unknown order
+    CHECK(std::holds_alternative<OrderRejected>(ev[5]));    // price out of range
+
+    // A rejected order consumes a sequence number but NOT an order id: it never
+    // existed as far as the book is concerned.
+    CHECK(std::get<OrderRejected>(ev[4]).reason == RejectReason::UnknownOrder);
+    CHECK(std::get<OrderRejected>(ev[5]).reason == RejectReason::PriceOutOfRange);
+    CHECK(std::get<OrderAccepted>(ev[0]).id == maker);
+}
+
+TEST_CASE("market_remainder_is_cancelled_with_no_liquidity", "[phase6][events]") {
+    Engine eng(kMin, kMax, 64);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    std::vector<Trade> trades;
+
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+                       .price = 0, .quantity = 100, .participant = 1}, trades);
+
+    const auto& ev = sink.events();
+    REQUIRE(ev.size() == 2);
+    REQUIRE(std::holds_alternative<OrderCancelled>(ev[1]));
+    CHECK(std::get<OrderCancelled>(ev[1]).reason == CancelReason::NoLiquidity);
+}
+
+TEST_CASE("sequence_numbers_never_go_backwards", "[phase6][events]") {
+    const auto cmds = make_stream(31337u, 2000);
+    Engine eng(kMin, kMax, 8192);
+    VectorSink sink;
+    eng.set_sink(&sink);
+
+    std::vector<Trade> scratch;
+    for (const auto& c : cmds) {
+        scratch.clear();
+        if (const auto* n = std::get_if<NewOrder>(&c)) eng.apply(*n, scratch);
+        else                                           eng.apply(*std::get_if<Cancel>(&c));
+    }
+
+    SeqNum last = 0;
+    for (const Event& e : sink.events()) {
+        const SeqNum s = std::visit([](const auto& x) { return x.seq; }, e);
+        REQUIRE(s > last);              // strictly increasing: it IS the order
+        last = s;
+    }
+    CHECK(sink.events().size() > 2000);
+}
+
+TEST_CASE("replay_the_same_input_twice_gives_a_byte_identical_log", "[phase6][replay]") {
+    // The whole claim of the design, in one assertion. ~10k commands.
+    const auto cmds = make_stream(20260906u, 10000);
+
+    const std::string first  = scenario::run(cmds, kMin, kMax, 8192);
+    const std::string second = scenario::run(cmds, kMin, kMax, 8192);
+
+    REQUIRE(first.size() > 10000);      // it actually did something
+    REQUIRE(first == second);           // byte for byte, fresh engine each time
+}
+
+TEST_CASE("a_scenario_round_trips_through_text", "[phase6][replay]") {
+    // The log is only useful as a regression net if it survives being written
+    // out and read back. This is also the LOBSTER on-ramp.
+    const auto cmds = make_stream(4242u, 3000);
+
+    const std::string   text   = scenario::to_text(cmds);
+    const auto          parsed = scenario::parse(text);
+
+    REQUIRE(parsed.size() == cmds.size());
+    REQUIRE(scenario::to_text(parsed) == text);          // text -> commands -> text
+
+    // And the reconstructed commands produce the identical event log.
+    REQUIRE(scenario::run(parsed, kMin, kMax, 8192) == scenario::run(cmds, kMin, kMax, 8192));
+}
+
+TEST_CASE("the_log_changes_when_behaviour_changes", "[phase6][replay]") {
+    // A replay test that passes no matter what is worthless. One different
+    // command must move the log, or the diff is not actually watching anything.
+    auto cmds = make_stream(777u, 500);
+    const std::string before = scenario::run(cmds, kMin, kMax, 8192);
+
+    cmds.emplace_back(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                               .price = 103, .quantity = 55, .participant = 1});
+    const std::string after = scenario::run(cmds, kMin, kMax, 8192);
+
+    CHECK(before != after);
+    CHECK(after.rfind(before, 0) == 0);   // append-only: the prefix is unchanged
 }
