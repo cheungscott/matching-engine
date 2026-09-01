@@ -551,6 +551,11 @@ when to spend a day on it.
 engine produces 6. The engine was right - accept, accept, trade, cancel, reject, reject - and the
 test's arithmetic was wrong.
 
+> **NUMBERS SUPERSEDED (D26).** The suite and gate figures in this entry (60 cases,
+> 151,847 assertions, 763,611 gate assertions, 3m47s, 1.2s, ctest 11.6s) were accurate when
+> written and were never updated as tests were added. Current figures live in `README.md`
+> and are re-measured, not carried forward. The reasoning below is unaffected.
+
 ### D16 - Property tests and the oracle fuzz, without RapidCheck (Phase 7)
 **, 2026-09-01.**
 
@@ -856,6 +861,11 @@ Still absent, with reasons:
   disqualifies it for a design that stores handles into levels. Deliberately unused.
 
 ### D21 - The measurement rig was measuring the wrong thing (Phase 10b)
+> **NUMBERS SUPERSEDED (D26).** The percentiles and the 12.2 M ops/sec below did not reproduce on
+> re-measurement: `cancel, hit` p50 was quoted at 87 ns and is 168; throughput is 10.2 M. They came
+> from single invocations recorded without a second run. Current figures live in `README.md` and
+> carry their spread. The methodology argument in this entry - per-run percentiles, p99.9 first -
+> is unaffected and is what made the error visible.
 **, 2026-09-01.**
 
 Two defects in `bench/latency.cpp`, both found by audit rather than by use, and both of the kind
@@ -1020,6 +1030,12 @@ The uncomfortable part is that a compiler flag found in one second what a carefu
 `-Wall -Wextra` is not in the default build. It should be.
 
 ### D24 - The oracle as a performance baseline, which D6 promised and did not build (Phase 10b)
+> **NUMBERS SUPERSEDED (D26), AND THE HEADLINE WAS WRONG.** The bolded **92x** below was the median
+> of three hand-run invocations that were 54.8 / 92.9 / 95.6. The median is arithmetically correct;
+> quoting a point estimate from a sample with that spread was not. An independent re-run measured
+> 74-87x, and the rig now performs its own 5 runs and prints the min-max range, which shows depth
+> 4,000 spanning 8-39x - not a quotable figure at any centre. Current table in `README.md`.
+> The reasoning below - that the ratio's GROWTH is the claim, not the ratio - is unaffected.
 **, 2026-09-01.**
 
 D6 folded in a "cheap win": point the Phase 10 rig at `NaiveBook` so the tick-array and pool

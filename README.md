@@ -46,10 +46,13 @@ NewOrder / Cancel  →  Engine        POLICY — the only part that decides anyt
                         └────────────→  Event log   the truth; the book is a cache
 ```
 
-**Four** allocations at construction — the level array, the occupancy bitmap, the
-pool's slab, and its free list — plus the id index. After that `Engine::apply`
-never calls the allocator, on any path, verified by an instrumented
-`operator new` that counts the *aligned* overloads too.
+**Five** allocations at construction — the level array, the occupancy bitmap, the id
+index, the pool's slab, and the pool's free list. After that `Engine::apply` never
+calls the allocator on any path it owns, verified at 0.00 per operation by an
+instrumented `operator new` that counts the *aligned* overloads too.
+
+(The previous version of this line said "four" and then listed five. The version
+before *that* said "two". The count is now measured rather than recounted by hand.)
 
 Two allocation sites remain **outside** `Engine` but reachable from `apply`, which
 is precisely why they were missed the first time — "outside the class" is not "off
@@ -75,7 +78,10 @@ the hot path".
 - **Pre-allocated pool** — the allocator's worst case is unbounded, and unbounded
   is what disqualifies it, not slow.
 - **id → node index** — a cancel message carries only an id. Without the index,
-  finding the order is a scan, and cancels are 90%+ of real message traffic.
+  finding the order is a scan, and cancels dominate real message traffic. The lookup
+  and the unlink are both O(1); a cancel that *empties the best level* additionally
+  advances the cursor over the occupancy bitmap at O(range/64), so "O(1) cancel"
+  is true of the common path and not of every path.
 - **Single-threaded core** — price-time priority requires a total order over
   events, so two threads on one book would serialise anyway. Sequential is the
   honest design here, not a compromise.
@@ -83,8 +89,8 @@ the hot path".
 ## Verification
 
 ```
-Default suite     63 cases, 152,766 assertions          1.3 s
-Fuzz gate         1.1M operations, 763,621 assertions   7m01 s
+Default suite     72 cases, 152,811 assertions          ~3.0 s
+Fuzz gate         1.1M operations, 763,621 assertions   7m30 s
 ```
 
 Both run under **AddressSanitizer and UndefinedBehaviorSanitizer**.
@@ -93,12 +99,18 @@ Four independent mechanisms, because each catches what the others cannot:
 
 1. **A differential oracle.** `tests/naive_book.hpp` is a deliberately obvious
    `std::map` implementation that shares no code with the engine, and therefore
-   cannot share a bug. Identical command streams go to both, and every returned
-   id, every trade field, both cursors and the depth at every price are compared
-   **after each operation**.
-2. **Seven invariants**, checked after every operation in the gate: uncrossed
-   book, index coherence, no occupied-but-empty level, level sums, FIFO ordering,
-   positive remainders, and pool discipline.
+   cannot share a *matching, storage or indexing* bug — it does include the engine's
+   header for the shared value types, so "shares no code" would be too strong.
+   Identical command streams go to both. Every returned id, every trade field except
+   `seq`, and both cursors are compared **after each operation**; the depth at every
+   price is compared after each operation in the two small cases, and once at the end
+   of the 100k gate case, where a per-operation sweep of the whole tick range would
+   dominate the runtime.
+2. **Seven invariants**, checked after every operation of the **100,000**-operation
+   differential case: uncrossed book, index coherence, no occupied-but-empty level,
+   level sums, FIFO ordering, positive remainders, and pool discipline. The separate
+   1,000,000-operation case checks log properties only — the two together are the
+   "1.1M operations" figure, and they do not both do the same work.
 3. **Properties over the event log alone.** A book can satisfy all its own
    invariants and still emit an illegal trade, so these check the *log*: every
    print is at the maker's price, no limit taker does worse than its limit,
@@ -138,24 +150,28 @@ latency distribution is a number nobody experiences.
 
 | Operation | p99.9 | p99 | max | (p50) |
 |---|---|---|---|---|
-| all | 434 ns | 178 ns | 24 µs | 42 ns |
-| add, rested | 267 ns | 119 ns | 24 µs | 39 ns |
-| add, traded | 313 ns | 180 ns | 14 µs | 63 ns |
-| cancel, hit | 564 ns | 356 ns | 9 µs | 87 ns |
-| cancel, unknown | 461 ns | 169 ns | 14 µs | 35 ns |
+| all | 531 ns | 246 ns | 24 µs | 47 ns |
+| add, rested | 338 ns | 124 ns | 19 µs | 39 ns |
+| add, traded | 460 ns | 198 ns | 14 µs | 63 ns |
+| cancel, hit | 895 ns | 537 ns | 10 µs | 168 ns |
+| cancel, unknown | 511 ns | 372 ns | 21 µs | 87 ns |
 
-Throughput: median 12.9 M ops/sec.
+Throughput: median **10.2 M ops/sec**.
 
-Each figure is already a median across 5 runs, and **consecutive invocations of the
-whole benchmark still move by roughly 5%** on p99.9 — a previous invocation gave 455
-ns for `all` where this one gives 434. That spread is the environment, not a change
-in the code, and quoting a single run to three significant figures would imply a
-precision this setup does not have.
+**Every figure here was re-measured for this release, and the previous ones did not
+survive.** The table used to claim 87 ns for `cancel, hit` p50; it is 168. Throughput
+was quoted at 12.9 M; it is 10.2 M. Those came from a single invocation, written down
+without a second run.
 
-The interesting number is `max`. It was ~1 ms before the id index was made
-bounded; the unbounded reallocation it removed cost **8.1 ms in a single
-operation** at 2M orders. `SYSTEM-DESIGN.md` D18 records that attempt as
-rejected, because getting it wrong is the more useful half of the story.
+Run-to-run spread, measured: two consecutive invocations of the whole benchmark gave
+531 and 574 ns for `all` p99.9 (**8%**), and maxima of 24 µs and 117 µs (**5x**). An
+earlier version of this file claimed "roughly 5%", which was itself a guess. Do not
+quote any of these to three significant figures.
+
+`SYSTEM-DESIGN.md` D18 records a rejected id-index design whose reallocation cost
+**8.1 ms in a single operation** at 2M orders. That number belongs to the *rejected*
+experiment, not to the shipped predecessor, and it is kept because getting it wrong is
+the more useful half of the story.
 
 ### Against the oracle it is verified by
 
@@ -164,18 +180,27 @@ differential-tested against. Because it is known *correct* and shares no code, i
 doubles as a performance baseline — which is what turns the design claims below from
 arguments into measurements.
 
-| depth | add ns/op (eng / naive) | cancel ns/op (eng / naive) | cancel ratio |
+| depth | add ns/op (eng / naive) | cancel ns/op (eng / naive) | cancel ratio [min-max] |
 |---|---|---|---|
-| 1,000 | 18.7 / 74.2 | 30.0 / 838 | 28x |
-| 4,000 | 14.5 / 56.9 | 39.6 / 1,707 | 43x |
-| 16,000 | 15.9 / 46.5 | 56.1 / 5,151 | **92x** |
+| 1,000 | 23.9 / 98.5 | 44.4 / 932 | 20x [16-23] |
+| 4,000 | 16.2 / 53.1 | 44.0 / 1,650 | 38x [8-39] |
+| 16,000 | 19.6 / 50.6 | 98.6 / 5,482 | 55x [51-91] |
 
-The claim is **not** "90x faster than `std::map`" — `NaiveBook` is deliberately dumb
-and that would be dishonest. The claim is how the gap *moves*: naive cancel roughly
-doubles per doubling of depth while the engine's stays flat, which is O(n) against
-O(1) showing up as it should. Add is a flat ~3-4x — a locality win, not a complexity
-one, and at ~200 price levels a tree lookup is only about 8 comparisons, so it would
-be overreach to call it more than that.
+Each cell is the median of **5 runs performed inside the binary**, and the bracket is
+the full min-max of the ratio across them. Look at depth 4,000: a median of 38x over a
+range of 8-39x. **That is not a quotable number, and the bracket is there so you can
+see that without being told.** An earlier version of this file printed a bolded 92x
+from three hand-run invocations and no spread at all.
+
+The claim is **not** "N times faster than `std::map`" — `NaiveBook` is deliberately
+dumb and that would be dishonest. The claim is about the *shape*: naive cancel goes
+932 → 5,482 ns as depth goes 1k → 16k, roughly tracking depth, which is the O(n) scan.
+The engine's goes 44 → 99 ns over the same range — **not flat**, because emptying the
+best level advances the cursor over the occupancy bitmap at O(range/64), but growing
+far slower than linearly.
+
+Add is a flat ~3-4x — a locality win, not a complexity one. At ~200 price levels a tree
+lookup is only about 8 comparisons, so calling it a complexity win would be overreach.
 
 ```bash
 cmake --build build-bench --target bench_baseline -j && ./build-bench/bench_baseline
@@ -197,8 +222,8 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The fuzz gate is hidden from the default run because it takes ~4 minutes, and a
-suite you stop running protects nothing:
+The fuzz gate is hidden from the default run because it takes several minutes under
+the sanitizers, and a suite you stop running protects nothing:
 
 ```bash
 ./build/phase1_tests "[gate]"
@@ -223,14 +248,18 @@ include/me/types.hpp         Order, Trade, and the value types
 include/me/asan.hpp          sanitizer poisoning shim
 include/me/object_pool.hpp   slab + free list
 include/me/price_level.hpp   intrusive FIFO at one price
-include/me/order_book.hpp    tick array, cursors, id index
+include/me/order_book.hpp    tick array, cursors, occupancy bitmap
+include/me/id_index.hpp      fixed-capacity open-addressed id -> node map
 include/me/engine.hpp        matching policy
 include/me/events.hpp        the sequenced event stream
 tests/naive_book.hpp         the differential oracle
-tests/properties.hpp         properties over the log
+tests/properties.hpp         properties over the log, and conservation
 tests/scenario.hpp           commands as text, and back
 tests/shrink.hpp             failing-stream minimiser
-bench/latency.cpp            the benchmark rig
+tests/phase1_tests.cpp       the suite
+bench/latency.cpp            per-operation latency percentiles
+bench/profile.cpp            allocation counting, and a target for perf
+bench/baseline.cpp           the engine against the oracle
 SYSTEM-DESIGN.md             every decision, with the alternatives rejected
 ```
 
@@ -240,7 +269,9 @@ disagrees with its own design document — including D18, a change that was made
 measured, found to be worse than what it replaced, and reverted.
 
 An adversarial audit of the whole codebase against its own stated design intent
-found 25 issues; the ones that changed code are recorded in D19 through D21. The
+found 25 issues, recorded in D19 through D23; a second audit before the v0.1 tag found
+nine more, including four regressions caused by the first audit's own fixes, recorded
+in D25 and D26. The
 recurring failure it identified is worth naming: **a decision's rationale lives
 in the phase that made it, and later phases do not re-read it.** The pool was
 built to keep the allocator off the hot path, and three phases later an index was
