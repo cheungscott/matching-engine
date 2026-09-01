@@ -81,6 +81,17 @@ endif()
 add_library(me_engine INTERFACE)
 target_include_directories(me_engine INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# -Wall -Wextra on OUR targets, propagated through the INTERFACE library so it
+# reaches tests and benches but not Catch2's own translation units.
+#
+# Added after the fact, which is the point: an adversarial audit of the whole
+# codebase missed a -Wreorder in OrderBook that this finds in one second. Not
+# -Werror — a warning that breaks the build gets suppressed, and a suppressed
+# warning is worse than an unread one. See D23.
+if(NOT MSVC)
+  target_compile_options(me_engine INTERFACE -Wall -Wextra)
+endif()
+
 # ---- Tests -----------------------------------------------------------------
 enable_testing()
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
