@@ -30,6 +30,11 @@ public:
     //
     // `max_resting` sizes the id index and must be the pool's capacity: no more
     // orders can rest than the pool can hand out slots for (D19).
+    // `max_resting` sizes the id index and MUST be at least the pool's capacity when
+    // one is used — Engine passes the same number to both. The default exists for
+    // standalone use in tests, where there is no pool; it is not a safe default
+    // alongside a larger pool. Over-filling is now loud (add() throws) rather than an
+    // unbounded probe loop, but the sizing is still the caller's job (D25.9).
     OrderBook(Price min_price, Price max_price, std::size_t max_resting = 1 << 16)
         : levels_(checked_span(min_price, max_price)),
           by_id_(max_resting),
@@ -58,6 +63,21 @@ public:
         if (!in_range(o->price)) {
             throw std::out_of_range("OrderBook::add: price outside the tick window");
         }
+        // D25.8 — the same rule, applied to the id. The block above cites D8's
+        // "unconditional for memory corruption" rule and then did not apply it one line
+        // later. IdIndex uses id 0 as its EMPTY marker (as does Engine::kRejected), so
+        // under NDEBUG a Slot{0, node} was written and still read as empty: never
+        // consumed, count_ incremented anyway, the order unremovable and its pool slot
+        // leaked, and count_ drifting past the load factor the probe loops depend on.
+        if (o->id == 0) {
+            throw std::invalid_argument("OrderBook::add: id 0 is reserved");
+        }
+        // D25.9 — refuse BEFORE touching anything. Everything below this line mutates,
+        // and IdIndex::insert is noexcept, so the only way add() can be strongly
+        // exception-safe is for every check to happen first.
+        if (by_id_.full()) {
+            throw std::length_error("OrderBook::add: id index is full");
+        }
         assert(!crosses(o->side, o->price) && "book must not decide to match; engine matches first");
 
         const std::size_t li = index_of(o->price);
@@ -73,7 +93,20 @@ public:
     }
 
     // O(1) expected. nullptr if no such order is resting.
-    [[nodiscard]] Order* find(OrderId id) const noexcept {
+    // D25.6 — the const overload yields a CONST pointer.
+    //
+    // This returned a mutable Order* from a const method, which made `const OrderBook&`
+    // decorative: D23 made Engine::book() const-only precisely so a caller could not
+    // mutate behind retire()'s back, and find() reopened that door one call later.
+    // Demonstrated: mutate o->price through the const handle, then cancel — the order
+    // is unlinked from a level that does not contain it, corrupting that level's links
+    // while it stays linked in its real one. Making the ACCESSOR const did not make the
+    // OBJECT const.
+    [[nodiscard]] const Order* find(OrderId id) const noexcept {
+        return (id == 0) ? nullptr : by_id_.find(id);
+    }
+
+    [[nodiscard]] Order* find(OrderId id) noexcept {
         return (id == 0) ? nullptr : by_id_.find(id);
     }
 
