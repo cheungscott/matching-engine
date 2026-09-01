@@ -109,6 +109,19 @@ costs nothing.
   isolation, TSan) re-enters scope - it is self-contained and does not touch the
   book.
 
+> [!done] TRIGGER FIRED AND CLOSED - 2026-09-01
+> Phases 1-4 came in green on **Mon 1 Sep**, a day inside the window, so the trigger
+> fired. **Scott closed it the same day:** 8-9 stay out until v0.1 has shipped. The
+> decision was recorded in `WORKING-RULES.md` and NOT here, which left a reader of this file
+> alone looking at an open trigger with no resolution. A decision log that records the
+> trigger but not the firing is worse than one that records neither, because it looks
+> complete.
+>
+> **The other half of D6 went unbuilt for longer.** The "cheap win folded in" -
+> pointing the Phase 10 rig at `NaiveBook` as a *performance* baseline - was never
+> done, while the README went on asserting the two claims D6 promised to measure.
+> Built 2026-09-01 as `bench/baseline.cpp`; see **D24**.
+
 ### D7 - Order layout: one cache line, aligned, Blueprint field order (Phase 1)
 > **CORRECTED 2026-09-01, re-measured with `offsetof`.** Two errors in the prose below.
 > (1) *"A 32-bit `price` drops straight into that gap"* is not what happens. `price` is at
@@ -1005,6 +1018,61 @@ was misleading. Harmless as written - but it inverted an order that does matter,
 
 The uncomfortable part is that a compiler flag found in one second what a careful audit did not.
 `-Wall -Wextra` is not in the default build. It should be.
+
+### D24 - The oracle as a performance baseline, which D6 promised and did not build (Phase 10b)
+**, 2026-09-01.**
+
+D6 folded in a "cheap win": point the Phase 10 rig at `NaiveBook` so the tick-array and pool
+choices go **from asserted to measured**. It was never built. Meanwhile the README kept asserting
+exactly the two claims it was meant to settle:
+
+> *"a tree is O(log n) pointer chasing over scattered heap nodes; an array index is arithmetic"*
+> *"the allocator's worst case is unbounded, and unbounded is what disqualifies it, not slow"*
+
+`NaiveBook` is the right strawman precisely because it was built for a different job. It is a
+`std::map` per side with a vector per level and an O(n) scan to cancel, it shares no code with the
+engine, and it is already differential-tested against it - so it is known to be *correct*, which
+is what makes a speed comparison mean anything.
+
+#### What is actually being claimed
+
+**Not** "we are 90x faster". That would be a claim about `std::map`, and a dishonest one, since
+`NaiveBook` is deliberately dumb. The claim is about **how the gap moves with depth**:
+
+| depth | add ns/op (eng / naive) | cancel ns/op (eng / naive) | cancel ratio |
+|---|---|---|---|
+| 1,000 | 18.7 / 74.2 | 30.0 / 838 | **28x** |
+| 2,000 | 17.5 / 64.1 | 34.1 / 989 | **29x** |
+| 4,000 | 14.5 / 56.9 | 39.6 / 1,707 | **43x** |
+| 8,000 | 18.2 / 57.3 | 44.8 / 3,380 | **75x** |
+| 16,000 | 15.9 / 46.5 | 56.1 / 5,151 | **92x** |
+
+Medians of 3 runs, g++ 11.4 `-O2 -DNDEBUG`, WSL2, same `rdtscp` timing as `bench_latency`.
+
+- **Cancel is the complexity result.** Naive cancel roughly DOUBLES for each doubling of depth -
+  800, 989, 1707, 3380, 5151 ns - which is the O(n) scan showing up exactly as it should. The
+  engine's stays roughly flat, which is the id index being O(1). The *ratio* growing from 28x to
+  92x over a 16x depth increase is the measurement; either single number is not.
+- **Add is a constant factor, and honestly so.** ~3-4x throughout, not growing. A tree lookup over
+  ~200 price levels is only ~8 comparisons, so O(log n) has barely started to hurt at this depth.
+  Claiming the array indexing as a *complexity* win here would be overreach. It is a locality and
+  branch-prediction win, and it is worth about 3x.
+- **Naive add gets FASTER with depth** (83 down to 47 ns). Not an anomaly: at low depth most adds
+  create new `std::map` nodes, and at high depth the levels already exist so it is a `push_back`
+  into an existing vector. Stated because an unexplained downward trend in a benchmark is normally
+  a bug, and here it is not.
+
+#### The 4,159x number that was almost published
+
+The first invocation reported naive add at **71,652 ns/op** at depth 1,000 - a 4,159x "win" - and
+it did not reproduce on any later run. First-touch page faults on the first `NaiveBook`
+constructed. `bench_latency` already warms up for this reason (D17) and this rig did not, because
+it was written fresh rather than by copying the discipline from the rig next to it.
+
+Worth recording because of how close it came to being a headline. It was spectacular, it was in
+the right direction, and it would have been quoted. **A number that flatters the thing you built
+deserves more scepticism than one that does not**, and the only reason this one was caught was
+running the benchmark a second time before writing it down.
 
 ---
 

@@ -157,8 +157,34 @@ bounded; the unbounded reallocation it removed cost **8.1 ms in a single
 operation** at 2M orders. `SYSTEM-DESIGN.md` D18 records that attempt as
 rejected, because getting it wrong is the more useful half of the story.
 
-The benchmark **refuses to run** if built with a sanitizer or without `NDEBUG`,
-so a wrong number cannot be produced by accident.
+### Against the oracle it is verified by
+
+`NaiveBook` is the `std::map`-per-side, O(n)-cancel implementation the engine is
+differential-tested against. Because it is known *correct* and shares no code, it
+doubles as a performance baseline — which is what turns the design claims below from
+arguments into measurements.
+
+| depth | add ns/op (eng / naive) | cancel ns/op (eng / naive) | cancel ratio |
+|---|---|---|---|
+| 1,000 | 18.7 / 74.2 | 30.0 / 838 | 28x |
+| 4,000 | 14.5 / 56.9 | 39.6 / 1,707 | 43x |
+| 16,000 | 15.9 / 46.5 | 56.1 / 5,151 | **92x** |
+
+The claim is **not** "90x faster than `std::map`" — `NaiveBook` is deliberately dumb
+and that would be dishonest. The claim is how the gap *moves*: naive cancel roughly
+doubles per doubling of depth while the engine's stays flat, which is O(n) against
+O(1) showing up as it should. Add is a flat ~3-4x — a locality win, not a complexity
+one, and at ~200 price levels a tree lookup is only about 8 comparisons, so it would
+be overreach to call it more than that.
+
+```bash
+cmake --build build-bench --target bench_baseline -j && ./build-bench/bench_baseline
+```
+
+The benchmarks **refuse to run** if built with a sanitizer or without `NDEBUG`, and
+`bench_latency` and `bench_profile` additionally **abort rather than report** if the
+caller's trade vector reallocated inside the measured region. A wrong number should
+take effort to produce.
 
 ## Build
 

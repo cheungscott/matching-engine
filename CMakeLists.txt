@@ -119,4 +119,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Bench")
   # One operation kind in a tight loop, for perf to sample (D19).
   add_executable(bench_profile bench/profile.cpp)
   target_link_libraries(bench_profile PRIVATE me_engine)
+
+  # The oracle as a performance baseline, which D6 promised and never built (D24).
+  # Reaches into tests/ for naive_book.hpp deliberately: one strawman, used by both
+  # the correctness suite and the measurement, so they cannot drift apart.
+  add_executable(bench_baseline bench/baseline.cpp)
+  target_link_libraries(bench_baseline PRIVATE me_engine)
+  target_include_directories(bench_baseline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 endif()
