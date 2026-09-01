@@ -14,6 +14,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace me {
@@ -38,12 +39,13 @@ public:
     }
 
     // Rest an order. PRECONDITION: it does not cross the opposite side.
-    void add(Order* o) noexcept {
+    void add(Order* o) {
         assert(o != nullptr);
         assert(in_range(o->price) && "price outside the book's tick window");
         assert(!crosses(o->side, o->price) && "book must not decide to match; engine matches first");
 
         levels_[index_of(o->price)].push_back(o);
+        by_id_.emplace(o->id, o);                            // D14: same step, always
 
         if (o->side == Side::Buy) {
             if (o->price > best_bid_) best_bid_ = o->price;   // improved the bid
@@ -51,6 +53,34 @@ public:
             if (o->price < best_ask_) best_ask_ = o->price;   // improved the ask
         }
     }
+
+    // O(1) expected. nullptr if no such order is resting.
+    [[nodiscard]] Order* find(OrderId id) const noexcept {
+        const auto it = by_id_.find(id);
+        return (it == by_id_.end()) ? nullptr : it->second;
+    }
+
+    // THE single removal path for the book. Unlink, drop the index entry, and
+    // advance the cursor if the level emptied — all in one step, so no caller
+    // can do two of the three (D14). The order is NOT returned to the pool here;
+    // the book does not own the pool. Engine::retire() closes that loop.
+    void remove(Order* o) noexcept {
+        assert(o != nullptr);
+        assert(in_range(o->price));
+        assert(find(o->id) == o && "order is not resting in this book");
+
+        const Price price = o->price;
+        const Side  side  = o->side;
+
+        levels_[index_of(price)].unlink(o);
+        by_id_.erase(o->id);
+
+        if (levels_[index_of(price)].empty()) {
+            on_level_emptied(side, price);
+        }
+    }
+
+    [[nodiscard]] std::size_t resting_count() const noexcept { return by_id_.size(); }
 
     [[nodiscard]] std::optional<Price> best_bid() const noexcept {
         return has_bids() ? std::optional<Price>{best_bid_} : std::nullopt;
@@ -105,12 +135,13 @@ public:
         return has_bids() && price <= best_bid_;
     }
 
-    // O(range). Tests and Phase 4's check_invariants(), never the hot path.
+    // Blueprint §3.6 invariants 1-6. O(range + resting orders). Tests and
+    // Phase 4's check_invariants(), never the hot path.
     [[nodiscard]] bool is_consistent() const noexcept {
-        // Invariant 1: both sides populated ⇒ best_bid < best_ask.
+        // 1: both sides populated ⇒ best_bid < best_ask.
         if (has_bids() && has_asks() && best_bid_ >= best_ask_) return false;
 
-        // Invariant 3: a cursor must point at a level that actually holds orders.
+        // 3: a cursor must point at a level that actually holds orders.
         if (has_bids() && levels_[index_of(best_bid_)].empty()) return false;
         if (has_asks() && levels_[index_of(best_ask_)].empty()) return false;
 
@@ -121,10 +152,25 @@ public:
             if (!levels_[index_of(p)].empty()) return false;
         }
 
+        // 4 and 5, per level.
         for (const PriceLevel& lvl : levels_) {
             if (!lvl.is_consistent()) return false;
         }
-        return true;
+
+        // 2 and 6: walk every resting order. Exactly one index entry each,
+        // pointing at THIS order, and nothing rests with nothing left.
+        std::size_t counted = 0;
+        for (const PriceLevel& lvl : levels_) {
+            for (const Order* o = lvl.front(); o != nullptr; o = o->next) {
+                if (o->remaining == 0)            return false;   // 6
+                if (o->price != lvl.price())      return false;
+                if (find(o->id) != o)             return false;   // 2
+                ++counted;
+            }
+        }
+        // A stale entry — an id in the index with no order in any level — shows
+        // up here and nowhere else. This is the dangling-pointer detector.
+        return counted == by_id_.size();
     }
 
 private:
@@ -148,6 +194,16 @@ private:
     // A cursor sitting on its sentinel means that side holds nothing.
     [[nodiscard]] bool has_bids() const noexcept { return best_bid_ >= min_price_; }
     [[nodiscard]] bool has_asks() const noexcept { return best_ask_ <= max_price_; }
+
+    // id -> node. THE gap Blueprint §3.4 names: a cancel carries only an id, so
+    // without this, finding the order means scanning the book and the O(1)
+    // cancel claim is silently false.
+    //
+    // DIVERGENCE from Blueprint §3.5, reasoning in D14: it stores Order* alone,
+    // not {node, price, side}. The extra fields are meant to save a cache miss,
+    // but every removal dereferences the node anyway for prev/next/remaining, so
+    // they buy nothing and add state that can drift from the order.
+    std::unordered_map<OrderId, Order*> by_id_;
 
     std::vector<PriceLevel> levels_;      // indexed by (price - min_price_)
     Price min_price_ = 0;
