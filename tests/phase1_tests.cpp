@@ -24,7 +24,9 @@
 #include "me/types.hpp"
 
 #include "naive_book.hpp"
+#include "properties.hpp"
 #include "scenario.hpp"
+#include "shrink.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -1181,4 +1183,150 @@ TEST_CASE("the_log_changes_when_behaviour_changes", "[phase6][replay]") {
 
     CHECK(before != after);
     CHECK(after.rfind(before, 0) == 0);   // append-only: the prefix is unchanged
+}
+
+// ===========================================================================
+//  PHASE 7 — property tests and full oracle fuzz. THE GATE.
+// ===========================================================================
+
+namespace {
+
+// Run a stream and return its event log, for property checking.
+std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
+                                  std::size_t pool_capacity = 8192) {
+    Engine     eng(kMin, kMax, pool_capacity);
+    VectorSink sink;
+    eng.set_sink(&sink);
+
+    std::vector<Trade> scratch;
+    for (const auto& c : cmds) {
+        scratch.clear();
+        if (const auto* n = std::get_if<NewOrder>(&c)) eng.apply(*n, scratch);
+        else                                           eng.apply(*std::get_if<Cancel>(&c));
+    }
+    return sink.events();
+}
+
+} // namespace
+
+TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") {
+    // The Blueprint's accept criterion. Properties are checked against the log
+    // rather than the book, so this stays cheap enough to run at scale: no
+    // per-operation O(range) invariant walk, just one pass over the events.
+    constexpr int kOps = 1'000'000;
+
+    const auto cmds = make_stream(20260907u, kOps);
+    const auto log  = run_for_events(cmds, 65536);
+
+    REQUIRE(log.size() > static_cast<std::size_t>(kOps));   // it did real work
+
+    const auto v = props::check(log, kMin, kMax);
+    INFO(v.why << " at event " << v.at_event);
+    REQUIRE(v.ok);
+}
+
+TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][phase7][fuzz]") {
+    // The expensive one: oracle diff AND all seven invariants after EVERY
+    // operation. Smaller count because each step is O(range + resting).
+    constexpr int kOps = 100'000;
+
+    Engine           real(kMin, kMax, 65536);
+    naive::NaiveBook ref(kMin, kMax);
+    const auto       cmds = make_stream(20260908u, kOps);
+
+    std::vector<Trade> got;
+    std::vector<Trade> want;
+
+    for (std::size_t i = 0; i < cmds.size(); ++i) {
+        INFO("diverged at operation " << i);
+        got.clear();
+        want.clear();
+
+        if (const auto* n = std::get_if<NewOrder>(&cmds[i])) {
+            REQUIRE(real.apply(*n, got) == ref.apply(*n, want));
+            REQUIRE(got.size() == want.size());
+            for (std::size_t j = 0; j < got.size(); ++j) {
+                REQUIRE(got[j].maker_id == want[j].maker_id);
+                REQUIRE(got[j].taker_id == want[j].taker_id);
+                REQUIRE(got[j].price    == want[j].price);
+                REQUIRE(got[j].quantity == want[j].quantity);
+            }
+        } else {
+            const Cancel& c = *std::get_if<Cancel>(&cmds[i]);
+            REQUIRE(real.apply(c) == ref.cancel(c.id));
+        }
+
+        REQUIRE(real.book().best_bid() == ref.best_bid());
+        REQUIRE(real.book().best_ask() == ref.best_ask());
+        REQUIRE(real.check_invariants());
+    }
+
+    for (Price p = kMin; p <= kMax; ++p) {
+        REQUIRE(real.book().depth_at(p) == ref.depth_at(p));
+    }
+}
+
+TEST_CASE("the_property_checker_catches_a_planted_violation", "[phase7][fuzz]") {
+    // A checker that never fails proves nothing. Corrupt a log four ways and
+    // confirm each one is caught — otherwise the million-operation run above is
+    // a very expensive way of computing `true`.
+    const auto cmds = make_stream(555u, 400);
+    const auto clean = run_for_events(cmds);
+    REQUIRE(props::check(clean, kMin, kMax).ok);
+
+    auto first_trade = [](const std::vector<Event>& log) -> std::size_t {
+        for (std::size_t i = 0; i < log.size(); ++i) {
+            if (std::holds_alternative<TradeExecuted>(log[i])) return i;
+        }
+        return log.size();
+    };
+    const std::size_t t = first_trade(clean);
+    REQUIRE(t < clean.size());
+
+    SECTION("a trade not at the maker's price") {
+        auto bad = clean;
+        std::get<TradeExecuted>(bad[t]).price += 1;
+        CHECK_FALSE(props::check(bad, kMin, kMax).ok);
+    }
+    SECTION("a trade for more than the order held") {
+        auto bad = clean;
+        std::get<TradeExecuted>(bad[t]).quantity += 1'000'000;
+        CHECK_FALSE(props::check(bad, kMin, kMax).ok);
+    }
+    SECTION("a trade with an unknown maker") {
+        auto bad = clean;
+        std::get<TradeExecuted>(bad[t]).maker_id = 999'999;
+        CHECK_FALSE(props::check(bad, kMin, kMax).ok);
+    }
+    SECTION("a cancelled order trading afterwards") {
+        auto bad = clean;
+        const OrderId maker = std::get<TradeExecuted>(bad[t]).maker_id;
+        bad.insert(bad.begin() + static_cast<long>(t),
+                   OrderCancelled{.seq = 0, .id = maker, .reason = CancelReason::UserRequested});
+        CHECK_FALSE(props::check(bad, kMin, kMax).ok);
+    }
+}
+
+TEST_CASE("the_shrinker_reduces_a_failing_stream", "[.gate][phase7][fuzz]") {
+    // Shrinking is the one thing a property library gives that a seeded loop
+    // does not, so it needs its own test. Predicate: "the log contains a trade
+    // at price 100" — arbitrary, but it depends on a specific few commands, so
+    // a correct shrinker must find them and drop everything else.
+    const auto cmds = make_stream(31415u, 4000);
+
+    auto has_trade_at_100 = [](const std::vector<scenario::Command>& c) {
+        for (const Event& e : run_for_events(c)) {
+            if (const auto* t = std::get_if<TradeExecuted>(&e)) {
+                if (t->price == 100) return true;
+            }
+        }
+        return false;
+    };
+
+    REQUIRE(has_trade_at_100(cmds));
+    const auto small = me::shrink::minimise(cmds, has_trade_at_100);
+
+    CHECK(has_trade_at_100(small));            // still reproduces
+    CHECK(small.size() < cmds.size() / 10);    // and is drastically smaller
+    INFO("shrank " << cmds.size() << " commands to " << small.size());
 }
