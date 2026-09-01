@@ -9,10 +9,10 @@ designated initializers, which is C++20. `std::expected` is the feature this
 design actually wants, and it needs a newer compiler than the build environment
 has.
 
-> **Status: v0.1 in progress.** The order book, matching, cancel, event log and
-> verification are complete and green. One item remains before v0.1 ships: a
-> profiling pass over the measured hot path. Nothing here is claimed to be
-> finished that is not.
+> **Status: every v0.1 scope item is complete and green**, including the profiling
+> pass that was the last one outstanding. Amend is cut and the SPSC ring is deferred,
+> both deliberately and both recorded. Nothing here is claimed to be finished that is
+> not; what is left is a decision about shipping, not about building.
 
 ---
 
@@ -28,7 +28,7 @@ has.
 | `NaiveBook` differential oracle | done |
 | Property tests + fuzz gate | done |
 | Benchmark rig | done |
-| **Profiling pass** | **remaining** |
+| Profiling pass + allocation audit | done |
 | Amend | cut from v0.1, deliberately |
 | SPSC ring buffer, single-writer ingress | deferred to v1.5, deliberately |
 
@@ -51,10 +51,19 @@ pool's slab, and its free list — plus the id index. After that `Engine::apply`
 never calls the allocator, on any path, verified by an instrumented
 `operator new` that counts the *aligned* overloads too.
 
-Two caveats stated rather than buried: the caller's `std::vector<Trade>&` will
-reallocate if a single sweep produces more trades than it holds, and an attached
-`EventSink` allocates per event. Both are outside `Engine` but reachable from
-`apply`, and neither is exercised by the benchmark.
+Two allocation sites remain **outside** `Engine` but reachable from `apply`, which
+is precisely why they were missed the first time — "outside the class" is not "off
+the hot path".
+
+- **The caller's `std::vector<Trade>&`** reallocates if one sweep outgrows it.
+  `max_trades_per_apply()` now exposes the bound (`pool capacity + 1`, because every
+  trade but the last fully consumes a resting maker), and both benchmarks **verify**
+  the vector's capacity never changed rather than assuming it.
+- **An attached `EventSink`** allocates per event. `VectorSink` is a test sink,
+  attached in no benchmark, and now has `reserve()`. Worth knowing why the obvious
+  measurement misses this: `push_back` is amortised O(1), so allocations *per event*
+  round to 0.00 while the growth reallocation is O(events so far). Counting
+  allocations per operation hides it exactly as it hid the rejected index in D18.
 
 **Why these choices**, in one line each:
 
@@ -74,13 +83,13 @@ reallocate if a single sweep produces more trades than it holds, and an attached
 ## Verification
 
 ```
-Default suite     60 cases, 151,847 assertions          1.2 s
-Fuzz gate         1.1M operations, 763,599 assertions   3m47 s
+Default suite     63 cases, 152,766 assertions          1.3 s
+Fuzz gate         1.1M operations, 763,621 assertions   7m01 s
 ```
 
 Both run under **AddressSanitizer and UndefinedBehaviorSanitizer**.
 
-Three independent mechanisms, because each catches what the others cannot:
+Four independent mechanisms, because each catches what the others cannot:
 
 1. **A differential oracle.** `tests/naive_book.hpp` is a deliberately obvious
    `std::map` implementation that shares no code with the engine, and therefore
@@ -94,12 +103,23 @@ Three independent mechanisms, because each catches what the others cannot:
    invariants and still emit an illegal trade, so these check the *log*: every
    print is at the maker's price, no limit taker does worse than its limit,
    nothing is filled beyond its quantity, a cancelled order never trades again.
+4. **Conservation, log against book.** Blueprint §4.5's headline property:
+   `original == Σ fills + resting remainder + cancelled remainder`. Note that
+   folded from the log *alone* this cannot fail — define the remainder as
+   `quantity - filled` and it is true by construction. It only has content when the
+   resting term comes from an independent source, so this folds the log into a
+   quantity ledger and checks it against what the book actually holds: the same
+   count of orders, the same ids, the same remaining on each, and the same total
+   walked from the book's own lists. A quantity that leaks fails here and nowhere
+   else.
 
 Plus deterministic replay: ~10,000 commands through two fresh engines produce
 **byte-identical** event logs.
 
-The property checker and the shrinker have their own tests — a checker that
-never fails proves nothing.
+Both property checkers and the shrinker have their own tests — a checker that never
+fails proves nothing, so each check is exercised against a deliberately planted
+violation. Where a check is sampled rather than run every operation, the frequency is
+stated in the test, because a silently sampled check reads as a total one.
 
 ## Measurements
 
@@ -118,13 +138,19 @@ latency distribution is a number nobody experiences.
 
 | Operation | p99.9 | p99 | max | (p50) |
 |---|---|---|---|---|
-| all | 455 ns | 215 ns | 28 µs | 42 ns |
-| add, rested | 312 ns | 113 ns | 19 µs | 36 ns |
-| add, traded | 367 ns | 180 ns | 20 µs | 58 ns |
-| cancel, hit | 663 ns | 449 ns | 9 µs | 131 ns |
-| cancel, unknown | 453 ns | 296 ns | 23 µs | 61 ns |
+| all | 434 ns | 178 ns | 24 µs | 42 ns |
+| add, rested | 267 ns | 119 ns | 24 µs | 39 ns |
+| add, traded | 313 ns | 180 ns | 14 µs | 63 ns |
+| cancel, hit | 564 ns | 356 ns | 9 µs | 87 ns |
+| cancel, unknown | 461 ns | 169 ns | 14 µs | 35 ns |
 
-Throughput: median 12.2 M ops/sec.
+Throughput: median 12.9 M ops/sec.
+
+Each figure is already a median across 5 runs, and **consecutive invocations of the
+whole benchmark still move by roughly 5%** on p99.9 — a previous invocation gave 455
+ns for `all` where this one gives 434. That spread is the environment, not a change
+in the code, and quoting a single run to three significant figures would imply a
+precision this setup does not have.
 
 The interesting number is `max`. It was ~1 ms before the id index was made
 bounded; the unbounded reallocation it removed cost **8.1 ms in a single
