@@ -103,6 +103,21 @@ public:
 
     [[nodiscard]] std::size_t resting_count() const noexcept { return by_id_.size(); }
 
+    // Sum of `remaining` over every resting order, walked from the intrusive
+    // lists rather than summed from PriceLevel's cached totals — the
+    // conservation property must not lean on the same cache is_consistent()
+    // exists to validate, or the two checks would agree by construction.
+    // O(resting), so this is a checkpoint check, not a per-operation one.
+    [[nodiscard]] Quantity total_resting_quantity() const noexcept {
+        Quantity total = 0;
+        for (std::size_t li = next_occupied(0); li != kNoLevel; li = next_occupied(li + 1)) {
+            for (const Order* o = levels_[li].front(); o != nullptr; o = o->next) {
+                total += o->remaining;
+            }
+        }
+        return total;
+    }
+
     [[nodiscard]] std::optional<Price> best_bid() const noexcept {
         return has_bids() ? std::optional<Price>{best_bid_} : std::nullopt;
     }
