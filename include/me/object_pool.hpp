@@ -104,6 +104,13 @@ public:
     // Not empty(): PriceLevel::empty() means "holds nothing", this is its opposite.
     [[nodiscard]] bool exhausted() const noexcept { return free_head_ == kNil; }
 
+    // D27 — test hook, and it earns its keep. Mutation testing showed that every
+    // clause of is_consistent() could be deleted with no test noticing, because
+    // several of them guard PRIVATE state that no public API can corrupt. The suite's
+    // own rule is "a checker that never fails proves nothing"; without this the rule
+    // could not be applied here. Declared, never defined outside the test build.
+    friend struct Probe;
+
     // Acyclic, and exactly available() long. O(capacity) — tests and Phase 4's
     // check_invariants(), never the hot path.
     [[nodiscard]] bool free_list_is_consistent() const noexcept {

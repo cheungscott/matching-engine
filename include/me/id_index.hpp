@@ -104,6 +104,10 @@ public:
         return n;
     }
 
+    // D27 test hook — see tests/mutation.hpp. count_ has to be corruptible for
+    // is_consistent()'s cardinality clause to have ever been shown to fire.
+    friend struct Probe;
+
 private:
     struct Slot {
         OrderId id   = kEmpty;

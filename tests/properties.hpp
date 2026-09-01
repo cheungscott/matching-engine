@@ -46,6 +46,7 @@ inline Violation check(const std::vector<Event>& log, Price min_price, Price max
 
     std::unordered_map<OrderId, Accepted> accepted;
     std::unordered_map<OrderId, Quantity> filled;
+    std::unordered_map<OrderId, Price>    taker_last;   // price priority, see below
     std::unordered_set<OrderId>           gone;      // cancelled, or fully filled
 
     for (std::size_t i = 0; i < log.size(); ++i) {
@@ -91,6 +92,23 @@ inline Violation check(const std::vector<Event>& log, Price min_price, Price max
             if (k->second.side == Side::Sell && t->price < k->second.price)
                 return fail("seller received less than its limit", i);
         }
+
+        // --- price priority, from the log alone (D27) -----------------------
+        // A taker sweeps best-first, so across ONE taker's fills the price can only
+        // move against it: non-decreasing for a buy, non-increasing for a sell. An
+        // engine that skipped the best level and came back to it shows up here.
+        //
+        // This exists because the million-operation gate passed an engine whose
+        // market takers filled from the second-best level while a better one existed:
+        // props::check applies no price constraint to a market taker, so only the
+        // 100k differential caught it, at a tenth of the operations.
+        if (const auto tl = taker_last.find(t->taker_id); tl != taker_last.end()) {
+            if (k->second.side == Side::Buy && t->price < tl->second)
+                return fail("a buy taker's fills improved in price - best level skipped", i);
+            if (k->second.side == Side::Sell && t->price > tl->second)
+                return fail("a sell taker's fills improved in price - best level skipped", i);
+        }
+        taker_last[t->taker_id] = t->price;
 
         // --- cancelled never matches ---------------------------------------
         if (gone.count(t->maker_id) != 0) return fail("a cancelled order traded again", i);
@@ -227,6 +245,13 @@ inline Violation check_conservation(const std::vector<Event>& log, const Book& b
                   + std::to_string(expected), log.size());
 
     // Blueprint §4.5, stated globally, with the resting term supplied by the book.
+    //
+    // HONEST NOTE (D27): this branch is unreachable given the two checks above.
+    // fold_ledger already guarantees accepted == filled + withdrawn + Σlive, and the
+    // check immediately above guarantees actual == Σlive. It is kept because it is the
+    // literal statement of §4.5 and a reader should be able to find the equation in the
+    // code — and because it becomes live the moment either of the other two is weakened.
+    // It is NOT counted as one of the checks that constrain the engine.
     if (led.accepted != led.filled + led.withdrawn + actual)
         return fail("conservation: accepted=" + std::to_string(led.accepted)
                   + " != filled=" + std::to_string(led.filled)

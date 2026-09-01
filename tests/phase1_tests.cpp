@@ -24,12 +24,14 @@
 #include "me/types.hpp"
 
 #include "naive_book.hpp"
+#include "mutation.hpp"
 #include "properties.hpp"
 #include "scenario.hpp"
 #include "shrink.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <limits>
 #include <random>
 
 using namespace me;
@@ -1215,6 +1217,370 @@ std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
 } // namespace
 
 // ===========================================================================
+//  D27 — planted violations for the INVARIANT checkers.
+//
+//  An audit neutered every `return false` in OrderBook::is_consistent,
+//  PriceLevel::is_consistent and ObjectPool::free_list_is_consistent, one at a
+//  time, and re-ran the whole suite. 15 of 15 survived. check_invariants() is
+//  called tens of thousands of times per gate run and no test had ever planted a
+//  violation of any of the seven invariants.
+//
+//  HONEST SCOPE: these prove the checker FIRES on each corruption. Where two
+//  clauses overlap (a bad cursor is both "crossed" and "points at an empty
+//  level") a test does not prove which one caught it, so it does not prove every
+//  clause is individually load-bearing. It does mean no corruption below goes
+//  unnoticed, which was not previously true of any of them.
+// ===========================================================================
+
+TEST_CASE("the book's consistency check catches a corrupted cursor", "[phase7][plants]") {
+    OrderBook book(kMin, kMax, 16);
+    Order b1 = make_order(1, Side::Buy,  100, 10, 1);
+    Order b2 = make_order(2, Side::Buy,  101, 10, 2);
+    Order a1 = make_order(3, Side::Sell, 105, 10, 3);
+    book.add(&b1); book.add(&b2); book.add(&a1);
+    REQUIRE(book.is_consistent());
+
+    SECTION("bid cursor above the ask cursor — the book reads as crossed") {
+        Probe::set_best_bid(book, 106);
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("bid cursor points at a level holding nothing") {
+        Probe::set_best_bid(book, 103);
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("ask cursor points at a level holding nothing") {
+        Probe::set_best_ask(book, 104);
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("a live level is left sitting inside the spread") {
+        Probe::set_best_bid(book, 99);       // 100 and 101 still hold orders
+        CHECK_FALSE(book.is_consistent());
+    }
+}
+
+TEST_CASE("the book's consistency check catches a corrupted order", "[phase7][plants]") {
+    OrderBook book(kMin, kMax, 16);
+    Order b1 = make_order(1, Side::Buy, 100, 10, 1);
+    Order b2 = make_order(2, Side::Buy, 100, 20, 2);
+    book.add(&b1); book.add(&b2);
+    REQUIRE(book.is_consistent());
+
+    SECTION("an order rests with nothing left — invariant 6") {
+        b2.remaining = 0;
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("an order's price disagrees with the level holding it") {
+        b1.price = 101;
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("the index does not point at this order — invariant 2") {
+        b2.id = 777;                         // index still maps the old id
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("the cached level total disagrees with the walk — invariant 4") {
+        Probe::set_total(Probe::level_at(book, 100), 999);
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("time priority is broken — invariant 5") {
+        b2.entry_seq = 0;                    // now <= its predecessor
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("a back-link is broken") {
+        b2.prev = nullptr;
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("the tail pointer no longer terminates the walk") {
+        Probe::set_tail(Probe::level_at(book, 100), &b1);
+        CHECK_FALSE(book.is_consistent());
+    }
+}
+
+TEST_CASE("the book's consistency check catches a corrupted bitmap or index",
+          "[phase7][plants]") {
+    // D20's bitmap clause carries the comment "neither is caught anywhere else",
+    // and until now nothing had ever made it fire.
+    OrderBook book(kMin, kMax, 16);
+    Order b1 = make_order(1, Side::Buy, 100, 10, 1);
+    book.add(&b1);
+    REQUIRE(book.is_consistent());
+
+    SECTION("a stale bit marks an empty level as occupied") {
+        Probe::flip_occupancy(book, 103);
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("a missing bit makes a live level invisible") {
+        Probe::flip_occupancy(book, 100);
+        CHECK_FALSE(book.is_consistent());
+    }
+    SECTION("the index counter drifts from the table") {
+        Probe::bump_index_count(book);
+        CHECK_FALSE(book.is_consistent());
+    }
+}
+
+TEST_CASE("a level's consistency check catches a broken list", "[phase7][plants]") {
+    PriceLevel lvl;
+    lvl.set_price(100);
+    Order o1 = make_order(1, Side::Buy, 100, 10, 1);
+    Order o2 = make_order(2, Side::Buy, 100, 20, 2);
+    lvl.push_back(&o1); lvl.push_back(&o2);
+    REQUIRE(lvl.is_consistent());
+
+    SECTION("head set, tail cleared") {
+        Probe::set_tail(lvl, nullptr);
+        CHECK_FALSE(lvl.is_consistent());
+    }
+    SECTION("the head has a predecessor") {
+        o1.prev = &o2;
+        CHECK_FALSE(lvl.is_consistent());
+    }
+    SECTION("the cached total is wrong") {
+        Probe::set_total(lvl, 31);
+        CHECK_FALSE(lvl.is_consistent());
+    }
+    SECTION("the tail does not terminate the walk") {
+        Probe::set_tail(lvl, &o1);
+        CHECK_FALSE(lvl.is_consistent());
+    }
+}
+
+TEST_CASE("the pool's free-list check catches a corrupted list", "[phase7][plants]") {
+    ObjectPool<Order> pool(8);
+    Order* a = pool.acquire();
+    Order* b = pool.acquire();
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    REQUIRE(pool.free_list_is_consistent());
+
+    SECTION("the head index is out of range") {
+        Probe::set_free_head(pool, 9999);
+        CHECK_FALSE(pool.free_list_is_consistent());
+    }
+    SECTION("the free list walks into a slot that is handed out") {
+        // Slot 0 is `a`, which is in use; splicing it into the free list is the
+        // corruption that would let two callers hold the same Order.
+        Probe::set_free_head(pool, 0);
+        CHECK_FALSE(pool.free_list_is_consistent());
+    }
+    SECTION("the free list contains a cycle") {
+        Probe::set_free_head(pool, 2);
+        Probe::set_next_free(pool, 2, 2);      // points at itself
+        CHECK_FALSE(pool.free_list_is_consistent());
+    }
+    SECTION("the free list is shorter than available() claims") {
+        Probe::set_free_head(pool, std::numeric_limits<std::uint32_t>::max());
+        CHECK_FALSE(pool.free_list_is_consistent());
+    }
+}
+
+// ===========================================================================
+//  D27 — a planted violation for EVERY branch of the log checkers.
+//
+//  Mutation testing found that 19 of 24 fail() branches could be deleted without
+//  any test noticing, and that all four conservation plants tripped the SAME
+//  branch while their comment claimed "one plant per check it makes".
+//
+//  So every plant below asserts WHICH branch fired, not merely that something
+//  did. Checking only `!ok` is what let four plants masquerade as four checks.
+// ===========================================================================
+
+namespace {
+
+Event acc(SeqNum s, OrderId id, Side side, OrderType type, Price p, Quantity q) {
+    return OrderAccepted{.seq = s, .id = id, .side = side, .type = type,
+                         .price = p, .quantity = q};
+}
+Event trd(SeqNum s, OrderId maker, OrderId taker, Price p, Quantity q) {
+    return TradeExecuted{.seq = s, .maker_id = maker, .taker_id = taker,
+                         .price = p, .quantity = q};
+}
+Event cxl(SeqNum s, OrderId id) {
+    return OrderCancelled{.seq = s, .id = id, .reason = CancelReason::UserRequested};
+}
+
+// The point of the whole section: name the branch you expect.
+void expect_check(const std::vector<Event>& log, const char* fragment) {
+    const auto v = props::check(log, kMin, kMax);
+    INFO("expected a violation containing: " << fragment);
+    INFO("actual: " << (v.ok ? std::string("(no violation at all)") : v.why));
+    REQUIRE_FALSE(v.ok);
+    REQUIRE(v.why.find(fragment) != std::string::npos);
+}
+
+void expect_fold(const std::vector<Event>& log, const char* fragment) {
+    props::Ledger  led;
+    const auto     v = props::fold_ledger(log, led);
+    INFO("expected a fold violation containing: " << fragment);
+    INFO("actual: " << (v.ok ? std::string("(no violation at all)") : v.why));
+    REQUIRE_FALSE(v.ok);
+    REQUIRE(v.why.find(fragment) != std::string::npos);
+}
+
+} // namespace
+
+TEST_CASE("every acceptance-checking branch has a planted violation", "[phase7][plants]") {
+    SECTION("order id reused") {
+        expect_check({acc(1, 1, Side::Buy, OrderType::Limit, 100, 10),
+                      acc(2, 1, Side::Buy, OrderType::Limit, 101, 10)}, "order id reused");
+    }
+    SECTION("accepted a zero-quantity order") {
+        expect_check({acc(1, 1, Side::Buy, OrderType::Limit, 100, 0)},
+                     "accepted a zero-quantity order");
+    }
+}
+
+TEST_CASE("every trade-legality branch has a planted violation", "[phase7][plants]") {
+    // A well-formed pair to corrupt: maker sells 10 at 100, taker buys 10 at 100.
+    const Event mk = acc(1, 1, Side::Sell, OrderType::Limit, 100, 10);
+    const Event tk = acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10);
+
+    SECTION("zero-quantity trade") {
+        expect_check({mk, tk, trd(3, 1, 2, 100, 0)}, "zero-quantity trade");
+    }
+    SECTION("trade outside the tick window") {
+        expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10), tk,
+                      trd(3, 1, 2, kMax + 50, 5)}, "trade outside the tick window");
+    }
+    SECTION("order traded with itself") {
+        expect_check({mk, tk, trd(3, 1, 1, 100, 5)}, "order traded with itself");
+    }
+    SECTION("trade with an unaccepted maker") {
+        expect_check({mk, tk, trd(3, 999, 2, 100, 5)}, "unaccepted maker");
+    }
+    SECTION("trade with an unaccepted taker") {
+        expect_check({mk, tk, trd(3, 1, 999, 100, 5)}, "unaccepted taker");
+    }
+    SECTION("both sides of a trade agree") {
+        expect_check({acc(1, 1, Side::Buy, OrderType::Limit, 100, 10), tk,
+                      trd(3, 1, 2, 100, 5)}, "both sides of a trade agree");
+    }
+    SECTION("a market order rested as maker") {
+        expect_check({acc(1, 1, Side::Sell, OrderType::Market, 0, 10), tk,
+                      trd(3, 1, 2, 100, 5)}, "market order rested as maker");
+    }
+    SECTION("trade not at the maker's price") {
+        expect_check({mk, tk, trd(3, 1, 2, 101, 5)}, "not at the maker's price");
+    }
+    SECTION("buyer paid more than its limit") {
+        // Taker will only pay 99; the maker rests at 100, so any print is too dear.
+        expect_check({mk, acc(2, 2, Side::Buy, OrderType::Limit, 99, 10),
+                      trd(3, 1, 2, 100, 5)}, "buyer paid more than its limit");
+    }
+    SECTION("seller received less than its limit") {
+        expect_check({acc(1, 1, Side::Buy, OrderType::Limit, 100, 10),
+                      acc(2, 2, Side::Sell, OrderType::Limit, 101, 10),
+                      trd(3, 1, 2, 100, 5)}, "seller received less than its limit");
+    }
+}
+
+TEST_CASE("both price-priority branches have a planted violation", "[phase7][plants]") {
+    // D27's new property. A taker sweeps best-first, so its fills can only get worse
+    // for it. A taker that trades at 101 and THEN at 100 skipped the better level.
+    SECTION("a buy taker's fills improved") {
+        expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10),
+                      acc(2, 2, Side::Sell, OrderType::Limit, 101, 10),
+                      acc(3, 3, Side::Buy,  OrderType::Limit, 105, 20),
+                      trd(4, 2, 3, 101, 10),      // took the worse level first
+                      trd(5, 1, 3, 100, 10)},     // then the better one
+                     "buy taker's fills improved");
+    }
+    SECTION("a sell taker's fills improved") {
+        expect_check({acc(1, 1, Side::Buy, OrderType::Limit, 101, 10),
+                      acc(2, 2, Side::Buy, OrderType::Limit, 100, 10),
+                      acc(3, 3, Side::Sell, OrderType::Limit, 95, 20),
+                      trd(4, 2, 3, 100, 10),
+                      trd(5, 1, 3, 101, 10)},
+                     "sell taker's fills improved");
+    }
+}
+
+TEST_CASE("every remaining check() branch has a planted violation", "[phase7][plants]") {
+    SECTION("a cancelled order traded again") {
+        expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10),
+                      acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10),
+                      cxl(3, 1),
+                      trd(4, 1, 2, 100, 5)}, "cancelled order traded again");
+    }
+    SECTION("maker filled beyond its original quantity") {
+        expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 5),
+                      acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10),
+                      trd(3, 1, 2, 100, 10)}, "maker filled beyond");
+    }
+    SECTION("taker filled beyond its original quantity") {
+        expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10),
+                      acc(2, 2, Side::Buy,  OrderType::Limit, 100, 5),
+                      trd(3, 1, 2, 100, 10)}, "taker filled beyond");
+    }
+}
+
+TEST_CASE("every fold_ledger branch has a planted violation", "[phase7][plants]") {
+    // These are unreachable through props::check — it catches most of them earlier via
+    // a different rule — so they are planted against the fold directly. Without this,
+    // three branches of the conservation ledger had never been shown to fire.
+    SECTION("fill against an order the log shows as not live") {
+        expect_fold({acc(1, 1, Side::Sell, OrderType::Limit, 100, 5),
+                     acc(2, 2, Side::Buy,  OrderType::Limit, 100, 5),
+                     trd(3, 1, 2, 100, 5),        // both now fully filled, so both gone
+                     trd(4, 1, 2, 100, 1)}, "not live");
+    }
+    SECTION("fill exceeds the order's outstanding quantity") {
+        expect_fold({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10),
+                     acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10),
+                     trd(3, 1, 2, 100, 4),
+                     trd(4, 1, 2, 100, 9)}, "exceeds the order's outstanding");
+    }
+    SECTION("cancel of an order the log shows as not live") {
+        expect_fold({acc(1, 1, Side::Buy, OrderType::Limit, 100, 10),
+                     cxl(2, 1),
+                     cxl(3, 1)}, "cancel of an order the log shows as not live");
+    }
+}
+
+TEST_CASE("every conservation branch that CAN fire has a planted violation",
+          "[phase7][plants]") {
+    // A real book with two resting orders and no trades, so the log can be corrupted
+    // one field at a time without the fold rejecting it for an unrelated reason.
+    Engine     eng(kMin, kMax, 64);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    std::vector<Trade> out;
+    const OrderId a = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                         .price = 100, .quantity = 10, .participant = 1}, out);
+    const OrderId b = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                         .price = 101, .quantity = 20, .participant = 1}, out);
+    REQUIRE(a != Engine::kRejected);
+    REQUIRE(b != Engine::kRejected);
+
+    const std::vector<Event> clean = sink.events();
+    REQUIRE(props::check_conservation(clean, eng.book()).ok);
+
+    auto expect_cons = [&](const std::vector<Event>& log, const char* fragment) {
+        const auto v = props::check_conservation(log, eng.book());
+        INFO("expected: " << fragment << " | actual: "
+                          << (v.ok ? std::string("(no violation)") : v.why));
+        REQUIRE_FALSE(v.ok);
+        REQUIRE(v.why.find(fragment) != std::string::npos);
+    };
+
+    SECTION("the counts disagree") {
+        auto bad = clean;
+        bad.push_back(acc(99, 12345, Side::Buy, OrderType::Limit, 100, 5));
+        expect_cons(bad, "the log accounts for");
+    }
+    SECTION("the log rests an id the book never held") {
+        // Count still matches: one id is SWAPPED, not added.
+        auto bad = clean;
+        std::get<OrderAccepted>(bad[1]).id = 4242;
+        expect_cons(bad, "the book has no such order");
+    }
+    SECTION("the book holds a different remaining than the log implies") {
+        auto bad = clean;
+        std::get<OrderAccepted>(bad[1]).quantity += 7;
+        expect_cons(bad, "the log implies");
+    }
+}
+
+// ===========================================================================
 //  D25 — regressions for the pre-ship audit. One per demonstrated defect.
 //
 //  Every one of these FAILED before its fix. They are here because the previous
@@ -1505,10 +1871,31 @@ TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") 
     Engine     eng(kMin, kMax, 65536);
     VectorSink sink;
     eng.set_sink(&sink);
-    feed(eng, cmds);
+
+    // Fed by hand rather than through feed(), so invariants can be checked periodically
+    // DURING the run and not only at the end (D27).
+    constexpr std::size_t kInvariantEvery = 10'000;
+    std::vector<Trade>    scratch;
+    for (std::size_t i = 0; i < cmds.size(); ++i) {
+        scratch.clear();
+        if (const auto* n = std::get_if<NewOrder>(&cmds[i])) eng.apply(*n, scratch);
+        else                                                 eng.apply(*std::get_if<Cancel>(&cmds[i]));
+        if ((i + 1) % kInvariantEvery == 0) {
+            INFO("invariants broke by operation " << i);
+            REQUIRE(eng.check_invariants());
+        }
+    }
     const std::vector<Event>& log = sink.events();
 
     REQUIRE(log.size() > static_cast<std::size_t>(kOps));   // it did real work
+
+    // D27 — this gate called props::check and check_conservation and NOTHING ELSE, and
+    // therefore passed an engine with time priority destroyed: make push_back push to
+    // the FRONT and 1,676,622 events go by clean, because no log property can see the
+    // order of a queue. check_invariants() is O(range + resting), so calling it after
+    // every one of a million operations is not affordable — every 10,000 is, and that
+    // is 100 chances to catch a FIFO break rather than none.
+    REQUIRE(eng.check_invariants());
 
     const auto v = props::check(log, kMin, kMax);
     INFO(v.why << " at event " << v.at_event);

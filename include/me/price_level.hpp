@@ -99,6 +99,13 @@ public:
     [[nodiscard]] Price price() const noexcept { return price_; }
     void set_price(Price p) noexcept { price_ = p; }
 
+    // D27 — test hook, and it earns its keep. Mutation testing showed that every
+    // clause of is_consistent() could be deleted with no test noticing, because
+    // several of them guard PRIVATE state that no public API can corrupt. The suite's
+    // own rule is "a checker that never fails proves nothing"; without this the rule
+    // could not be applied here. Declared, never defined outside the test build.
+    friend struct Probe;
+
     // O(n). Tests and Phase 4's check_invariants(), never the hot path.
     // Checks: reachable both ways, entry_seq strictly increases head to tail
     // (invariant 5), and the cached total matches the walk (invariant 4).

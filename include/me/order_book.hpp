@@ -265,6 +265,13 @@ public:
         return counted == by_id_.count_live() && counted == by_id_.size();
     }
 
+    // D27 — test hook, and it earns its keep. Mutation testing showed that every
+    // clause of is_consistent() could be deleted with no test noticing, because
+    // several of them guard PRIVATE state that no public API can corrupt. The suite's
+    // own rule is "a checker that never fails proves nothing"; without this the rule
+    // could not be applied here. Declared, never defined outside the test build.
+    friend struct Probe;
+
 private:
     static constexpr std::size_t kNoLevel = ~std::size_t{0};
 
