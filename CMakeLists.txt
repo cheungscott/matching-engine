@@ -46,6 +46,16 @@ if(NOT MSVC)
     add_link_options(-fsanitize=thread)
   elseif(CMAKE_BUILD_TYPE STREQUAL "Bench")
     add_compile_options(-O2 -g -DNDEBUG)
+  else()
+    # STREQUAL is case-sensitive, so without this branch -DCMAKE_BUILD_TYPE=bench or
+    # =Release would silently produce NO optimisation, NO -g, NO NDEBUG, NO sanitizers
+    # and no bench targets: a build that looks like every other build and verifies and
+    # measures nothing. Refuse.
+    message(FATAL_ERROR
+      "CMAKE_BUILD_TYPE is '${CMAKE_BUILD_TYPE}'. This project defines exactly three, "
+      "and they are case-sensitive: Debug (ASan+UBSan, the one that verifies), TSan "
+      "(for the ring buffer when it arrives), Bench (-O2 -DNDEBUG, the ONLY one "
+      "permitted to produce a latency number). Anything else gets no flags at all.")
   endif()
 endif()
 
@@ -80,18 +90,22 @@ endif()
 add_library(me_engine INTERFACE)
 target_include_directories(me_engine INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# -Wall -Wextra on the project's targets, propagated through the INTERFACE library so it
-# reaches tests and benches but not Catch2's own translation units.
+# NOTE: warnings are set at directory scope above (-Wall -Wextra -Wconversion), which
+# reaches every target declared after it, so me_engine carries no INTERFACE warning
+# options of its own. Change warnings there, not here.
 #
-# Added after the fact, which is the point: a full read-through of the
-# codebase missed a -Wreorder in OrderBook that this finds in one second. Not
-# -Werror — a warning that breaks the build gets suppressed, and a suppressed
+# Not -Werror: a warning that breaks the build gets suppressed, and a suppressed
 # warning is worse than an unread one.
-if(NOT MSVC)
-  target_compile_options(me_engine INTERFACE -Wall -Wextra)
-endif()
 
 # ---- Tests -----------------------------------------------------------------
+# Not built under Bench. There, `ctest --test-dir build-bench` would run the whole
+# suite green under -O2 -DNDEBUG with no sanitizers and every assert compiled out,
+# verifying far less than it appears to, with nothing saying so. Bench builds
+# benchmarks and nothing else.
+if(CMAKE_BUILD_TYPE STREQUAL "Bench")
+  message(STATUS "Bench build: tests are NOT built. Verification lives in the Debug build.")
+else()
+
 enable_testing()
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
@@ -106,6 +120,19 @@ add_executable(phase1_tests tests/phase1_tests.cpp)
 target_link_libraries(phase1_tests PRIVATE me_engine Catch2::Catch2WithMain)
 target_include_directories(phase1_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 catch_discover_tests(phase1_tests)
+
+# catch_discover_tests does not enumerate hidden [.gate] tests, so the three
+# most expensive cases in the project (the million-operation property run, the 100k
+# differential with invariants, and the shrinker) would be INVISIBLE to `ctest`
+# without this, and a green run would omit the entire fuzz gate.
+#
+# Registered explicitly, and it runs BY DEFAULT: the safe thing should happen unless
+# you opt out. For the fast edit loop, opt out by label:
+#     ctest --test-dir build -LE gate
+add_test(NAME phase7_gate COMMAND phase1_tests "[gate]")
+set_tests_properties(phase7_gate PROPERTIES LABELS "gate" TIMEOUT 2400)
+
+endif()   # NOT Bench
 
 # ---- Benchmarks ------------------------------------------------------------
 # Bench ONLY. The binary itself also refuses to run under a sanitizer or with
