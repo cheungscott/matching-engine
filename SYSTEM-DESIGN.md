@@ -1287,6 +1287,95 @@ That is the finding an interviewer can check in ten seconds, and it is the one w
 costs the most - because the sentence is *about* not overstating. Fixed by making it true rather
 than by softening it.
 
+### D27 - The checkers were trusted, not tested. Mutation testing found it; nothing else did.
+**, 2026-09-01.** Third of three pre-ship audits, and the only
+one that mutated the engine and re-ran the suite. It landed **after** the v0.1 tag was pushed,
+because the tag went out when two of three had reported. That was a mistake and it is recorded
+here rather than tidied away: the two audits that read the code found nothing in this area, and
+the one that broke the code on purpose found all of it.
+
+#### The finding, in one sentence
+
+**Deleting any single clause of any invariant checker changes no test result.**
+
+| checker | clauses neutered one at a time | detected by the suite or the gate |
+|---|---|---|
+| `OrderBook::is_consistent` | 9 | **0** |
+| `PriceLevel::is_consistent` | 4 | **0** |
+| `ObjectPool::free_list_is_consistent` | 2 | **0** |
+
+Including invariant 1 (uncrossed book), invariant 2 (index points at this order), invariant 6
+(nothing rests at zero), the free-list cycle detector, and the D20 bitmap check **whose own comment
+says "neither is caught anywhere else"**.
+
+`check_invariants()` is called tens of thousands of times per run and accounts for a large share of
+the 763,621 gate assertions. **No test has ever planted a violation of any of the seven.** The file
+applies exactly this discipline to `props::check` - *"A checker that never fails proves nothing"* -
+and never applied it to the invariant checkers.
+
+#### The gate passes an engine with time priority destroyed
+
+`properties_hold_over_a_million_operations` calls `props::check` and `check_conservation` and
+**never calls `check_invariants()`**. With `PriceLevel::push_back` pushing to the FRONT - LIFO, the
+central guarantee of a price-TIME-priority book gone - the million-operation gate runs clean over
+1,676,622 events. One added call would have caught it.
+
+It also passes an engine whose **market takers skip the best level**, because `props::check`
+deliberately applies no price constraint to a market taker. Only the 100k differential catches
+that, at a tenth of the operations.
+
+The Blueprint's stated accept criterion for Phase 7 is that million-operation run. It does not
+constrain the two properties the whole design exists to provide.
+
+#### 19 of 24 violation branches are undemonstrated
+
+Neutering each `return fail(...)` in `properties.hpp` one at a time, only **5** are killed by any
+planted violation. Undemonstrated branches include `properties.hpp:232` - which **is** Blueprint
+§4.5, `accepted != filled + withdrawn + resting`.
+
+Worse, the conservation plants are not what their comment claims. `the_conservation_checker_catches_
+a_planted_violation` says *"One plant per check it makes."* All four plants produce the **same**
+message from the **same** branch (the count comparison). The three checks carrying the actual
+conservation content - per-order remaining, the indexed-sum cross-check, and §4.5's equation - have
+no plant at all, and all three can be replaced with `if (false)` without changing the assertion
+count by one.
+
+That comment was written the same day, in the commit that added conservation. **Believing a test
+does what its comment says is how all of this happened.**
+
+#### Tests that pass with zero assertions
+
+Two cases assert entirely inside `if (book.best_bid())` with no preceding `has_value()`. Break the
+cursor - the exact defect they exist to catch - and they report `assertions: - none -` and pass. A
+third runs 1 of its 3. Four more dereference `std::optional` unguarded, which is UB that neither
+ASan nor UBSan diagnoses.
+
+#### And the gate does not run under the documented command
+
+`ctest --test-dir build` is what `CMakeLists.txt` and the test file both document.
+`catch_discover_tests` does not enumerate hidden `[.gate]` tests, so the three most expensive cases
+in the project are invisible to it. Following the README gives a green run with the entire Phase 7
+gate omitted.
+
+#### Two measurement findings
+
+- **The throughput figure is about half instrumentation.** Same workload with and without the
+  per-operation `rdtscp`+`lfence` pair: 12.99 M vs 28.01 M ops/sec. `lfence` is a serialising
+  instruction. The latency block carries three caveats; the throughput number carried none.
+- **`ctest --test-dir build-bench` runs the whole suite green** with `-O2 -DNDEBUG`, no sanitizers,
+  and every `assert` compiled out. CMake warns loudly about MinGW Debug and says nothing about this.
+
+#### What this changes about the project's claims
+
+Not the architecture, and not the differential oracle, which is genuinely independent and caught
+every mutant thrown at it. What it changes is the *strength* claimed for the assertion counts. The
+honest position: **152,811 and 763,621 are counts of checks executed, not of behaviours
+constrained.** A large fraction were checks that could not fail.
+
+The repair is the one the project already knew about and applied in one place: plant a violation
+for every branch of every checker, and make the headline gate call the checker that constrains time
+priority.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
