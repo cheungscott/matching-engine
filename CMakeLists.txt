@@ -93,6 +93,7 @@ catch_discover_tests(test_types)
 # Engine acceptance suite (Phases 1-7).
 add_executable(phase1_tests tests/phase1_tests.cpp)
 target_link_libraries(phase1_tests PRIVATE me_engine Catch2::Catch2WithMain)
+target_include_directories(phase1_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 catch_discover_tests(phase1_tests)
 
 # Benchmarks never link a sanitizer; guard against being built in Debug by mistake.
