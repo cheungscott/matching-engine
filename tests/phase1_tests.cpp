@@ -39,6 +39,23 @@ using namespace me;
 namespace {
 
 // Build a resting order without going through the pool, for the container tests.
+// D27. Two tests used to read
+//     check_bbo(book.best_bid(), 101);
+// which passes with ZERO assertions when the cursor is broken - the exact defect
+// they exist to catch. Mutating the cursor update out of OrderBook::add made both
+// report "assertions: - none -" and pass.
+//
+// Elsewhere the same comparison was written as a bare `CHECK(*best_ask() == ...)`,
+// which is undefined behaviour on an empty optional and is diagnosed by NEITHER
+// AddressSanitizer nor UndefinedBehaviorSanitizer.
+//
+// So every BBO comparison goes through here: REQUIRE the value exists (which aborts
+// the test rather than reading it), then compare.
+void check_bbo(const std::optional<Price>& actual, Price expected) {
+    REQUIRE(actual.has_value());
+    CHECK(*actual == expected);
+}
+
 Order make_order(OrderId id, Side side, Price price, Quantity qty, SeqNum seq) {
     Order o{};
     o.id          = id;
@@ -394,7 +411,7 @@ TEST_CASE("book_add_buy_sets_best_bid_only", "[phase1][book]") {
     book.add(&b);
 
     CHECK(book.best_bid().has_value());
-    if (book.best_bid()) CHECK(*book.best_bid() == Price{101});
+    check_bbo(book.best_bid(), 101);
     CHECK(!book.best_ask().has_value());
 }
 
@@ -404,12 +421,12 @@ TEST_CASE("book_best_bid_is_the_highest", "[phase1][book]") {
     Order hi = make_order(2, Side::Buy, 101, 300, 2);
     book.add(&lo);
     book.add(&hi);
-    if (book.best_bid()) CHECK(*book.best_bid() == Price{101});
+    check_bbo(book.best_bid(), 101);
 
     // Adding a WORSE bid must not move the cursor.
     Order worse = make_order(3, Side::Buy, 99, 100, 3);
     book.add(&worse);
-    if (book.best_bid()) CHECK(*book.best_bid() == Price{101});
+    check_bbo(book.best_bid(), 101);
 }
 
 TEST_CASE("book_best_ask_is_the_lowest", "[phase1][book]") {
@@ -418,11 +435,11 @@ TEST_CASE("book_best_ask_is_the_lowest", "[phase1][book]") {
     Order lo = make_order(2, Side::Sell, 102, 250, 2);
     book.add(&hi);
     book.add(&lo);
-    if (book.best_ask()) CHECK(*book.best_ask() == Price{102});
+    check_bbo(book.best_ask(), 102);
 
     Order worse = make_order(3, Side::Sell, 104, 100, 3);
     book.add(&worse);
-    if (book.best_ask()) CHECK(*book.best_ask() == Price{102});
+    check_bbo(book.best_ask(), 102);
 }
 
 TEST_CASE("book_best_level_exposes_the_right_queue", "[phase1][book]") {
@@ -451,7 +468,9 @@ TEST_CASE("book_stays_uncrossed_invariant_1", "[phase1][book]") {
 
     CHECK(book.best_bid().has_value());
     CHECK(book.best_ask().has_value());
-    if (book.best_bid() && book.best_ask()) CHECK(*book.best_bid() < *book.best_ask());
+    REQUIRE(book.best_bid().has_value());
+    REQUIRE(book.best_ask().has_value());
+    CHECK(*book.best_bid() < *book.best_ask());
 }
 
 // ===========================================================================
@@ -467,7 +486,7 @@ TEST_CASE("engine_rests_an_order_on_an_empty_book", "[phase1][engine]") {
 
     CHECK(trades.size() == std::size_t{0});
     CHECK(eng.book().best_bid().has_value());
-    if (eng.book().best_bid()) CHECK(*eng.book().best_bid() == Price{101});
+    check_bbo(eng.book().best_bid(), 101);
 }
 
 TEST_CASE("engine_does_not_match_when_it_does_not_cross", "[phase1][engine]") {
@@ -480,8 +499,8 @@ TEST_CASE("engine_does_not_match_when_it_does_not_cross", "[phase1][engine]") {
                        .price = 101, .quantity = 100, .participant = 2}, trades);
 
     CHECK(trades.size() == std::size_t{0});
-    if (eng.book().best_bid()) CHECK(*eng.book().best_bid() == Price{101});
-    if (eng.book().best_ask()) CHECK(*eng.book().best_ask() == Price{102});
+    check_bbo(eng.book().best_bid(), 101);
+    check_bbo(eng.book().best_ask(), 102);
 }
 
 TEST_CASE("engine_exact_full_fill_at_one_price", "[phase1][engine]") {
@@ -594,7 +613,7 @@ TEST_CASE("engine_partial_fill_of_the_resting_order", "[phase2][engine]") {
     CHECK(trades[0].maker_id == maker);
 
     REQUIRE(eng.book().best_ask().has_value());
-    CHECK(*eng.book().best_ask() == Price{102});
+    check_bbo(eng.book().best_ask(), 102);
     CHECK(eng.book().is_consistent());
 }
 
@@ -614,7 +633,7 @@ TEST_CASE("engine_partial_fill_of_the_incoming_order", "[phase2][engine]") {
 
     CHECK_FALSE(eng.book().best_ask().has_value());       // ask side consumed
     REQUIRE(eng.book().best_bid().has_value());
-    CHECK(*eng.book().best_bid() == Price{102});          // 40 left, now a bid
+    check_bbo(eng.book().best_bid(), 102);          // 40 left, now a bid
     CHECK(eng.book().is_consistent());
 }
 
@@ -660,7 +679,7 @@ TEST_CASE("engine_stops_mid_level_leaving_the_second_maker_partly_filled", "[pha
     CHECK(trades[1].quantity == Quantity{80});   // 180 - 100
 
     REQUIRE(eng.book().best_ask().has_value());
-    CHECK(*eng.book().best_ask() == Price{102});  // 70 of `second` still resting
+    check_bbo(eng.book().best_ask(), 102);  // 70 of `second` still resting
     CHECK(eng.book().is_consistent());
 }
 
@@ -709,7 +728,7 @@ TEST_CASE("engine_walks_two_price_levels", "[phase3][engine]") {
     CHECK(trades[2].quantity == Quantity{50});   // level 102 exhausted, cursor advanced
 
     REQUIRE(eng.book().best_ask().has_value());
-    CHECK(*eng.book().best_ask() == Price{103});       // 150 of a5 left
+    check_bbo(eng.book().best_ask(), 103);       // 150 of a5 left
     CHECK(eng.book().depth_at(102) == Quantity{0});
     CHECK(eng.book().depth_at(103) == Quantity{150});
     CHECK(eng.book().is_consistent());
@@ -789,8 +808,8 @@ TEST_CASE("engine_boundary_at_or_better_includes_equal", "[phase3][engine]") {
         eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                            .price = 101, .quantity = 100, .participant = 2}, trades);
         CHECK(trades.empty());
-        CHECK(*eng.book().best_bid() == Price{100});
-        CHECK(*eng.book().best_ask() == Price{101});
+        check_bbo(eng.book().best_bid(), 100);
+        check_bbo(eng.book().best_ask(), 101);
         CHECK(eng.book().is_consistent());
     }
 }
@@ -937,11 +956,11 @@ TEST_CASE("cancel_that_empties_the_best_level_advances_the_cursor", "[phase4][en
                                             .price = 102, .quantity = 10, .participant = 1}, trades);
     eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 105, .quantity = 10, .participant = 1}, trades);
-    REQUIRE(*eng.book().best_ask() == Price{102});
+    check_bbo(eng.book().best_ask(), 102);
 
     CHECK(eng.apply(Cancel{.id = best}));
     REQUIRE(eng.book().best_ask().has_value());
-    CHECK(*eng.book().best_ask() == Price{105});    // cursor walked outward
+    check_bbo(eng.book().best_ask(), 105);    // cursor walked outward
     CHECK(eng.check_invariants());
 }
 
@@ -955,7 +974,7 @@ TEST_CASE("cancel_of_a_non_best_level_leaves_the_cursor_alone", "[phase4][engine
                                             .price = 105, .quantity = 10, .participant = 1}, trades);
 
     CHECK(eng.apply(Cancel{.id = deep}));
-    CHECK(*eng.book().best_ask() == Price{102});    // unmoved
+    check_bbo(eng.book().best_ask(), 102);    // unmoved
     CHECK(eng.book().depth_at(105) == Quantity{0});
     CHECK(eng.check_invariants());
 }
