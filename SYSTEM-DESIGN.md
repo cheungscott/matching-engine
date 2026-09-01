@@ -12,6 +12,9 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
 ## Decision log
 
 ### D0 — Value types: aliases vs strong types (Phase 0)
+> **AMENDED by D7:** this entry says `Price = int64_t`. It is `int32_t` since D7 narrowed it so
+> `Order` fits one cache line. The alias-vs-strong-type reasoning below still stands, and its
+> revisit trigger is still open — see D20's C++23 list for `operator<=>` on a strong `Price`.
 - **Chosen (for now):** plain aliases — `Price = int64_t`, `Quantity = uint64_t`, etc.
 - **Alternative:** wrap `Price` in a `struct` with `operator<=>` so price/quantity
   mixing is a compile error.
@@ -32,6 +35,9 @@ Full rationale lives in the vault (`Matching-Engine-Design.md` +
   a schema migration, if the field already exists. Fields are cheap; migrations aren't.
 
 ### D3 — Toolchain: std::print unavailable on MinGW g++ 15.2
+> **AMENDED 2026-09-01:** this entry says the fallback is `std::format` + `std::cout`. Neither is
+> used anywhere — `std::format` needs g++ 13 and the build environment is 11.4. Everything that
+> prints uses `std::printf`. See D20.
 - **Found:** `<print>` fails to link on this build (`std::__open_terminal` undefined).
 - **Chosen:** use `std::format` + `std::cout` / fmtlib instead of `std::print`.
 
@@ -667,6 +673,197 @@ meaningful; the far tail is contaminated. Do not quote these as pinned-core figu
 **The Phase 10b lead is already visible:** `cancel, hit` is 2.4x the cost of resting an order, and
 cancels are the message type that dominates real flow. That is where the profiler should be pointed
 first - and it is a hypothesis to test, not a conclusion.
+
+### D18 - REJECTED: dense vector id index (Phase 10b, first attempt)
+**, 2026-09-01. Recorded because it was WRONG.**
+
+Three source files cited "D18" for a day while this entry did not exist. That is the exact failure
+this project is supposed to prevent, in its purest form: the rationale did not merely live in
+another phase, it was never written.
+
+**What it was.** Replace `std::unordered_map<OrderId, Order*>` with `std::vector<Order*>` indexed by
+id, growing via `resize()`. Motivated by a real, measured finding: the map allocated **0.95 `new`
+per resting order and 1.00 `delete` per cancel**, putting the allocator back on the exact path
+`ObjectPool` exists to keep it off.
+
+**Why it was rejected.** It replaced *many bounded* allocations with *rare unbounded* ones. Measured
+cost of a single `Engine::apply` at the moment of reallocation:
+
+| resting orders | that one call |
+|---|---|
+| 65,535 | 229 µs |
+| 1,048,575 | 4,055 µs |
+| 2,097,151 | **8,096 µs** |
+
+The pool's founding rule is *"the allocator's worst case is unbounded, and **unbounded is what
+disqualifies it, not slow**."* The replacement satisfied that criterion **less well than the thing
+it replaced**. A map node is ~50-100 ns every time; a vector regrow is O(ids ever issued) and ids
+never stop.
+
+**And it was reported wrong, twice.** First as a 47% p50 improvement, with a 2.8x p99.9 regression
+on `add, rested` (456 -> 1,283 ns) in a footnote. Then `reserve()` was added and reported as the
+fix - but the benchmark reserves 4x a 2^20 pool and runs 400k operations, so **growth never fires
+in the measurement**. The absence of the defect in a workload that cannot exhibit it was reported
+as its absence.
+
+> [!warning] The lesson, which is the point of keeping this entry
+> Blueprint §8.3 already listed the correct answer - *"reserve the id index"* - and more
+> importantly, the bound was available all along: **the pool caps how many orders can rest at
+> once**, so live index entries were never unbounded even though ids are. The fix needed a
+> different container, not a bigger guess. See D19.
+
+### D19 - The bounded id index, and the correctness fixes the audit surfaced (Phase 10b)
+**, 2026-09-01**, after an adversarial audit found 25 issues,
+of which these are the ones that changed code.
+
+#### `IdIndex` - fixed-capacity open addressing, allocates exactly once
+
+`include/me/id_index.hpp`. Sized from **pool capacity** at construction and never grows, because at
+most `capacity` orders can rest at once - the pool says so. Live entries are bounded even though ids
+are not, which is the observation both previous attempts missed.
+
+| | allocations | worst single op |
+|---|---|---|
+| `unordered_map` | 1 per insert, 1 per erase | bounded (~50-100 ns) |
+| `vector` by id | rare | **unbounded — 8.1 ms measured** |
+| **`IdIndex`** | **zero after construction** | **bounded** |
+
+- **Table size** `bit_ceil(capacity * 2)`, so load factor can never exceed 0.5 and linear probing
+  stays short. Asserted, not assumed.
+- **Identity hash, deliberately.** Ids are engine-assigned and strictly increasing, so masking
+  distributes them perfectly AND keeps recently-issued ids - the ones most likely to be cancelled -
+  adjacent in memory. A scrambling hash distributes equally well and destroys that locality. This
+  is only safe because ids are never client-supplied; a client-chosen id would make it adversarial.
+- **`id == 0` means empty.** `Engine::kRejected` already reserves 0, so the sentinel costs no
+  occupancy bit.
+- **Backward-shift deletion, not tombstones.** Tombstones accumulate and degrade every later probe;
+  in a process that runs all day, a tombstone table gets permanently slower. Backward shift keeps
+  the table clean by relocating any element whose probe chain the hole would break.
+
+**Verified:** `bench_profile` reports **0.00 new and 0.00 delete per operation** across rest, trade
+and cancel - and for the first time that number is trustworthy, because the counter now overrides
+the *aligned* `operator new` too. `Order` is `alignas(64)`, so every `Order` allocation had been
+invisible to the instrument built to police allocation (F3).
+
+#### F4 - the log could contradict the book, and a replayer could not repair it
+
+`OrderAccepted` was emitted **before** the pool was consulted. On exhaustion the log read
+Accepted-then-Rejected, and `OrderRejected` carries **no id**, so a consumer folding the log rests
+an order the book never held. *"Book state == fold(events)"* was false on a reachable path.
+
+Compounding it: D13 deliberately sized the fuzz so exhaustion never fires, and `properties.hpp`
+skips `OrderRejected` entirely. **The one path where the log lied was the one path excluded from
+every check.**
+
+**Fix:** a limit order reserves its pool slot *before* it is accepted. An order is now only accepted
+if the engine can honour it, and a rejected order burns no id. Markets need no slot since they never
+rest. Cost is one acquire/release pair on the fully-filled path - both pointer bumps.
+
+#### F5 - signed overflow in `checked_span`, UBSan-confirmed
+
+D10 reasoned about the *sentinels* overflowing and missed the *span*: `max_price - min_price` is
+int32 arithmetic. `OrderBook(-2e9, 2e9)` triggered UB before the guard could run. Now widened to
+`int64` first, with an explicit level-count bound.
+
+#### F6 - `retire()` discarded `release()`'s report
+
+D8's whole architecture is *"the pool REPORTS and the caller DECIDES"*, and the deciding call site
+threw the answer away. The entire return-`bool` design terminated in a shrug. Now asserted.
+
+#### F7 - D8's rule was applied in `ObjectPool` and nowhere else
+
+*"A check preventing MEMORY CORRUPTION is unconditional"* - but `OrderBook::add` and `remove`
+guarded unchecked `operator[]` writes with `assert` alone, which `-DNDEBUG` deletes in the Bench
+config. `add()` now throws on an out-of-range price; `remove()` returns `false` rather than
+corrupting, following the pool's report-don't-abort shape.
+
+#### F25 - market orders put junk in the log
+
+A market order's `price` was copied verbatim into `OrderAccepted`. Two behaviourally identical
+market orders carrying different junk produced **different byte-for-byte logs** - a canonicality
+hole in the exact artefact the replay test diffs. Now normalised to 0 before it reaches the log.
+
+### D20 - Occupancy bitmap, and what "C++23" actually means here (Phase 10b)
+**, 2026-09-01.**
+
+#### The cursor scan was a tail spike, and the profiler finally asked
+
+D10 shipped a linear cursor scan and said the bitmap graduation *"belongs in Phase 10, after a
+profiler asks for it."* The audit measured **1,064 scan iterations inside a single operation** on
+this project's own benchmark workload, and an adversarial case at 6,625 cycles - 21x a normal
+cancel. It asked.
+
+`std::vector<std::uint64_t> occupied_`, one bit per level. `std::countr_zero` / `std::countl_zero`
+find the next occupied level in one instruction, so 64 empty levels are skipped per word and the
+worst case drops from O(range) to O(range/64).
+
+`is_consistent()` gained a check that the bitmap agrees with the levels: a **stale bit** sends a
+cursor to an empty level, a **missing bit** makes a live level invisible, and neither is caught
+anywhere else.
+
+#### The honest position on "C++23"
+
+The README claimed C++23 and the codebase used **no C++23 feature at all** - the newest thing in it
+was designated initializers, which is C++20. That is a flag, not a language claim, and it would have
+been the first line of a CV bullet.
+
+Now used, and used because they earn their place rather than to justify the label:
+
+| Feature | Where | Why it earns its place |
+|---|---|---|
+| `std::countr_zero` / `countl_zero` (`<bit>`) | cursor advance | the fix for a **measured** tail spike |
+| `std::bit_ceil` (`<bit>`) | `IdIndex` table sizing | power-of-two masking, no division |
+| `std::to_underlying` (C++23) | `to_line` | cannot pick the wrong type if an enum's underlying type changes - and log canonicality is load-bearing |
+
+Still absent, with reasons:
+
+- **`std::expected`** - Blueprint §7 calls it the flagship. Needs g++ 12; WSL has 11.4. `g++-12` is
+  one apt install away and this is the top v1.5 item, since it is the right shape for the reject
+  path F4 exposed.
+- **`std::format` / `std::print`** - g++ 13 and 14 respectively. Not available.
+- **`operator<=>` on a strong `Price`** - D0's revisit trigger. Genuinely valuable (it would make
+  price/quantity mixing a compile error) but it touches every file; v1.5.
+- **`std::flat_map`** - Blueprint marks it KNOW, DON'T USE. Reference instability on insert
+  disqualifies it for a design that stores handles into levels. Deliberately unused.
+
+### D21 - The measurement rig was measuring the wrong thing (Phase 10b)
+**, 2026-09-01.**
+
+Two defects in `bench/latency.cpp`, both found by audit rather than by use, and both of the kind
+that produce confident wrong numbers rather than obvious failures.
+
+**F12 - it misdescribed its own methodology.** It printed *"median of per-run percentiles"* and
+computed percentiles over all 5 runs **pooled**. Pooling lets whichever single run caught the worst
+hypervisor jitter dominate the tail; a median across runs is robust to exactly that, which is
+presumably why the line was written that way. The file whose stated purpose is *"this program is
+the methodology"* was lying about its methodology. Now it does what it says.
+
+**F13 - the headline finding rested on an artefact.** Warm and measured workloads were generated
+independently, each numbering cancel targets from id 1. By the time the measured stream ran, the
+engine's `next_id_` was past everything it tried to cancel, so **92% of cancels missed** and
+`cancel, hit` was 2.4% of samples. The Phase 10a conclusion *"cancel is 2.4x the cost of resting"*
+was drawn from that population. Now one continuous stream is generated and split, so measured
+cancels target orders the warm phase actually rested. Hit count roughly doubled.
+
+**And the report now leads with p99.9.** Column order is not cosmetic. The previous layout led with
+p50, and that is how a 47% median improvement got reported while a 2.8x p99.9 regression sat in a
+footnote. Course 2.1: *"the mean of a latency distribution is a number nobody experiences."*
+
+#### Results, on the metric that matters
+
+Median of per-run percentiles, ns. Original = `unordered_map`; rejected = D18's vector; current =
+`IdIndex` + bitmap.
+
+| p99.9 | original | rejected (D18) | **current** |
+|---|---|---|---|
+| ALL | 524 | 932 | **455** |
+| add, rested | 456 | 1,056 | **312** |
+| add, traded | 559 | 409 | **367** |
+| cancel, hit | 779 | 582 | **663** |
+| **max observed** | ~1,000,000 | 1,197,334 | **28,464** |
+
+The max is the number worth looking at: **35x lower**, because the unbounded allocations are gone.
+Throughput 12.2 M ops/sec, p50 42 ns - reported last, on purpose.
 
 ---
 

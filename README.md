@@ -1,6 +1,13 @@
 # Matching Engine
 
-A single-symbol, price-time-priority limit order book in **C++23**.
+A single-symbol, price-time-priority limit order book in **C++20**, built with
+`-std=c++23` and using C++23's `std::to_underlying` in the log serialiser.
+
+That phrasing is deliberate. An earlier version of this file said "in C++23",
+and the codebase used no C++23 feature at all — the newest thing in it was
+designated initializers, which is C++20. `std::expected` is the feature this
+design actually wants, and it needs a newer compiler than the build environment
+has.
 
 > **Status: v0.1 in progress.** The order book, matching, cancel, event log and
 > verification are complete and green. One item remains before v0.1 ships: a
@@ -39,8 +46,15 @@ NewOrder / Cancel  →  Engine        POLICY — the only part that decides anyt
                         └────────────→  Event log   the truth; the book is a cache
 ```
 
-Two dynamic allocations exist in the whole engine, both at construction. After
-that the hot path never calls the allocator.
+**Four** allocations at construction — the level array, the occupancy bitmap, the
+pool's slab, and its free list — plus the id index. After that `Engine::apply`
+never calls the allocator, on any path, verified by an instrumented
+`operator new` that counts the *aligned* overloads too.
+
+Two caveats stated rather than buried: the caller's `std::vector<Trade>&` will
+reallocate if a single sweep produces more trades than it holds, and an attached
+`EventSink` allocates per event. Both are outside `Engine` but reachable from
+`apply`, and neither is exercised by the benchmark.
 
 **Why these choices**, in one line each:
 
@@ -61,7 +75,7 @@ that the hot path never calls the allocator.
 
 ```
 Default suite     60 cases, 151,847 assertions          1.2 s
-Fuzz gate         1.1M operations, 763,611 assertions   3m47 s
+Fuzz gate         1.1M operations, 763,599 assertions   3m47 s
 ```
 
 Both run under **AddressSanitizer and UndefinedBehaviorSanitizer**.
@@ -89,23 +103,33 @@ never fails proves nothing.
 
 ## Measurements
 
-> **These are not pinned-core numbers and must not be quoted as such.** They were
-> taken under WSL2, which is a virtual machine; an isolated core is not
-> achievable from inside a guest. `max` reached 1.0 ms, which is the hypervisor,
-> not the engine. **p50 is meaningful; the far tail is contaminated.**
+> **Not pinned-core numbers, and must not be quoted as such.** Taken under WSL2,
+> which is a virtual machine; an isolated core is not achievable from inside a
+> guest. p50 through p99.9 sit well below the millisecond spikes a hypervisor
+> produces and are believable; **`max` is an upper bound on the environment, not
+> on the engine.**
 
 g++ 11.4, `-O2 -DNDEBUG`, no sanitizers, 5 runs × 200k operations, warm.
 Per-operation timing via `rdtscp` + `lfence`; TSC rate measured, not assumed;
-timer floor ~10 ns.
+timer floor ~10 ns. Percentiles are computed per run then medianed.
 
-| Operation | p50 | p99 |
-|---|---|---|
-| add, rested | 73 ns | 187 ns |
-| add, traded | 88 ns | 311 ns |
-| cancel, hit | 178 ns | 510 ns |
-| cancel, unknown | 58 ns | 206 ns |
+**p99.9 first, deliberately** — this is a latency system, and the mean of a
+latency distribution is a number nobody experiences.
 
-Throughput: median 9.17 M ops/sec.
+| Operation | p99.9 | p99 | max | (p50) |
+|---|---|---|---|---|
+| all | 455 ns | 215 ns | 28 µs | 42 ns |
+| add, rested | 312 ns | 113 ns | 19 µs | 36 ns |
+| add, traded | 367 ns | 180 ns | 20 µs | 58 ns |
+| cancel, hit | 663 ns | 449 ns | 9 µs | 131 ns |
+| cancel, unknown | 453 ns | 296 ns | 23 µs | 61 ns |
+
+Throughput: median 12.2 M ops/sec.
+
+The interesting number is `max`. It was ~1 ms before the id index was made
+bounded; the unbounded reallocation it removed cost **8.1 ms in a single
+operation** at 2M orders. `SYSTEM-DESIGN.md` D18 records that attempt as
+rejected, because getting it wrong is the more useful half of the story.
 
 The benchmark **refuses to run** if built with a sanitizer or without `NDEBUG`,
 so a wrong number cannot be produced by accident.
@@ -160,4 +184,12 @@ SYSTEM-DESIGN.md             every decision, with the alternatives rejected
 
 `SYSTEM-DESIGN.md` is the interesting file. It records what was chosen, what was
 rejected, what was measured, and the places where the implementation deliberately
-disagrees with its own design document.
+disagrees with its own design document — including D18, a change that was made,
+measured, found to be worse than what it replaced, and reverted.
+
+An adversarial audit of the whole codebase against its own stated design intent
+found 25 issues; the ones that changed code are recorded in D19 through D21. The
+recurring failure it identified is worth naming: **a decision's rationale lives
+in the phase that made it, and later phases do not re-read it.** The pool was
+built to keep the allocator off the hot path, and three phases later an index was
+added that put it back.
