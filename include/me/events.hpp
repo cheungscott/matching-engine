@@ -67,11 +67,25 @@ struct EventSink {
 };
 
 // Collects events in memory. The test sink, and the fold-into-a-book sink.
+//
+// F10, stated plainly because it is easy to miss: this sink REINTRODUCES the
+// failure mode D18 was rejected for. `push_back` is amortised O(1), so the
+// allocation COUNT per event looks like zero — but the growth reallocation is
+// O(events so far) and events never stop, which is a rare unbounded stall on
+// the hot path, not a cheap frequent one. Counting allocations per operation
+// would hide it exactly as it hid in D18.
+//
+// It is a TEST sink and is not attached in any benchmark. A caller that attaches
+// one in anger must either reserve() a bound up front or write a sink that does
+// not grow (ring buffer, file, socket). The engine cannot bound this for them.
 class VectorSink final : public EventSink {
 public:
     void publish(const Event& e) override { events_.push_back(e); }
     [[nodiscard]] const std::vector<Event>& events() const noexcept { return events_; }
     void clear() noexcept { events_.clear(); }
+
+    // The only way to make this sink safe on a hot path.
+    void reserve(std::size_t n) { events_.reserve(n); }
 
 private:
     std::vector<Event> events_;

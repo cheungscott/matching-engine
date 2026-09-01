@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <string>
 
@@ -171,8 +172,13 @@ struct RunResult {
 
 RunResult one_run(const std::vector<Command>& warm, const std::vector<Command>& measured) {
     Engine eng(9'000, 11'000, 1 << 20);
+    // F9: `apply` appends here, so growth would be an allocation inside the
+    // timed region. eng.max_trades_per_apply() is the true bound but is pool-
+    // sized; this workload cannot approach it, so reserve generously and CHECK
+    // afterwards. An unverified reserve is how D18's reserve() claim went wrong.
     std::vector<Trade> trades;
-    trades.reserve(64);
+    trades.reserve(4096);
+    const std::size_t trade_cap0 = trades.capacity();
 
     // Warm-up: caches, branch predictors, and the pool's pages all need to be
     // touched before the numbers mean steady state rather than first-touch.
@@ -200,6 +206,16 @@ RunResult one_run(const std::vector<Command>& warm, const std::vector<Command>& 
         out.samples.push_back(Sample{t1 - t0, kind});   // CYCLES, converted at report time
     }
     const auto wall = Clock::now() - wall_start;
+
+    // Refuse to report rather than report a contaminated number — the same rule
+    // that makes this binary reject sanitizer builds.
+    if (trades.capacity() != trade_cap0) {
+        std::fprintf(stderr,
+                     "INVALID: the trade vector grew %zu -> %zu inside the timed "
+                     "loop; these samples include an allocation\n",
+                     trade_cap0, trades.capacity());
+        std::exit(3);
+    }
 
     const double secs = std::chrono::duration<double>(wall).count();
     out.ops_per_sec = static_cast<double>(measured.size()) / secs;
