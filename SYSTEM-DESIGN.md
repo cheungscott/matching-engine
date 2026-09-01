@@ -881,6 +881,131 @@ Median of per-run percentiles, ns. Original = `unordered_map`; rejected = D18's 
 The max is the number worth looking at: **35x lower**, because the unbounded allocations are gone.
 Throughput 12.2 M ops/sec, p50 42 ns - reported last, on purpose.
 
+### D22 - Conservation, and why the Blueprint's own statement of it is vacuous (Phase 7)
+**, 2026-09-01.**
+
+Blueprint §4.5 calls conservation *"your single best property test"* and states it as
+
+> `taker.original == Σ fills + rested remainder + cancelled remainder`
+
+with §9.2 asking for it *"per order + global"*. It was the last unimplemented headline property.
+`properties.hpp` had a section **labelled** conservation, but it only checked the *inequality*
+`filled <= quantity`. The equation was never checked.
+
+#### The finding that shaped the implementation
+
+**Folded from the log alone, that equation cannot fail.** Define the rested remainder as
+`quantity - filled` and it is true by construction, whatever the engine did. Implemented the
+obvious way it would be an expensive way of computing `true` - the same defect the Phase 7 tests
+already guard against by planting violations.
+
+It acquires content only when the resting term comes from an **independent source**. That source
+is the book. So what is actually checked is the log's account of what should still be resting
+against what the book really holds:
+
+| check | what it proves |
+|---|---|
+| `book.resting_count() == live.size()` | the two agree on HOW MANY orders rest |
+| every live id found, `remaining` matches | the two agree on WHICH, and on each quantity |
+| `book.total_resting_quantity() == Σ live` | the book's own walk agrees with its index |
+| `accepted == filled + withdrawn + resting` | §4.5, globally, with the book supplying the last term |
+
+The first two prove the **sets** agree; the third and fourth prove the **quantities** do. A
+quantity that leaks - a level reduced with no trade emitted, or a trade emitted without reducing
+the book - fails here and nowhere else.
+
+`fold_ledger` also asserts its own arithmetic balances. That check **is** forced by the fold, and
+the comment says so rather than dressing it up as an engine check: it guards a future edit to
+`fold_ledger`, nothing more.
+
+#### `total_resting_quantity()` walks the lists, not the cached totals
+
+`PriceLevel` caches a running `total_quantity_`. Summing those caches would be cheaper, and
+useless: `is_consistent()` already validates that cache against the list, so conservation would be
+agreeing with a number that another check had already blessed. Walking the intrusive lists
+directly makes the two checks independent, which is the entire point of having both. Cost is
+O(resting), which is why it is a checkpoint check.
+
+#### Where it runs, stated rather than sampled silently
+
+| site | frequency | why |
+|---|---|---|
+| `conservation_holds_after_every_operation` | after **every** op, 900 ops | Blueprint §9.2's literal ask |
+| differential gate | every 5,000 ops + at the end, 100k ops | folding the log is O(log), so per-op would be O(ops²) |
+| million-op gate | once, against the final book | full scale |
+
+Blueprint §9.2 asks for it after every operation at gate scale. That is O(ops²) and would take
+the gate from four minutes to hours. The deviation is real, so it is written down here and in the
+test's own comment rather than left for a reader to discover from the loop bounds. **A silently
+sampled check reads as a total one.**
+
+#### And it is tested against planted violations
+
+Four plants, one per check: a fill the book performed but the log omits; an order accepted for
+more than it really was; a cancel the book performed but the log omits; an order the log accepts
+and the book never held. One of them originally sat behind `if (cxl < clean.size())`, which would
+have passed silently on a stream with no cancels - now a `REQUIRE`. That is the same defect class
+as D13 sizing the fuzz so exhaustion never fires.
+
+Plus `conservation_survives_pool_exhaustion`, which runs a 16-slot pool specifically to force
+rejections, and REQUIREs that it saw one before checking anything. That is **the path F4 was
+hiding on**: an `OrderRejected` moves no quantity, so a half-accepted order breaks the balance.
+
+### D23 - The two allocation sites that are not in Engine, and are still reachable from it (Phase 10b)
+**, 2026-09-01.**
+
+The README claimed *"two dynamic allocations exist in the whole engine, both at construction"*.
+Wrong on both halves: there are four at construction, and two allocation sites remain reachable
+from `apply`. Neither is *in* `Engine`, which is exactly why both were missed - "outside the class"
+is not the same as "not on the hot path".
+
+#### F9 - the caller's trade vector
+
+`apply(const NewOrder&, std::vector<Trade>& out)` appends to a vector the CALLER owns. A sweep
+deeper than its capacity reallocates: an unbounded allocation on the hot path, **the precise
+defect D18 was rejected for**, sitting one indirection away and unnoticed while D18 was being
+argued about.
+
+The bound is the pool's, by the same argument that sized `IdIndex`: every trade but the last fully
+consumes a resting maker, and at most `capacity` orders can rest. So `max_trades_per_apply()`
+returns `pool.capacity() + 1`, and a caller that reserves it cannot make `apply` allocate.
+
+Both rigs reserved **64** - a guess, and a guess that happens to hold is still a guess. They now
+reserve generously and **verify the capacity did not change**, exiting with a loud INVALID rather
+than reporting. That is the same rule that makes them refuse to run under a sanitizer, applied to
+a defect they could previously have hidden. Verified: 0.00 new / 0.00 delete per operation across
+all four profile modes with the check armed, and `bench_latency` completes without tripping it.
+
+#### F10 - VectorSink
+
+`push_back` per event. The important part is *why the obvious measurement would have missed it*:
+`push_back` is amortised O(1), so allocations-per-event rounds to **0.00**, while the growth
+reallocation is O(events so far) and events never stop. **Counting allocations per operation would
+hide this exactly as it hid D18.** The metric that catches it is the max single operation, not the
+mean - the same lesson as D21, in a different place.
+
+It is a TEST sink, attached in no benchmark. It now has `reserve()`, and its header says plainly
+that a caller attaching one in anger must either bound it up front or write a sink that does not
+grow. The engine cannot bound this on their behalf, and pretending otherwise would be the third
+version of the same mistake.
+
+#### `Engine::book()` is const-only now
+
+The non-const overload let any caller add to or remove from the book behind `retire()`'s back -
+the one path that keeps book, index and pool in step (D14). Nothing outside `Engine` used it.
+An accessor that hands out mutation rights nobody wants is a latent invariant break.
+
+#### -Wreorder, and what it says about the audit
+
+Turning `-Wall -Wextra` on over a clean build produced exactly one warning in the entire codebase,
+and it was in code written the same day: `by_id_` declared before `levels_` but initialised after
+it. C++ initialises in **declaration** order and ignores the member-init list's order, so the list
+was misleading. Harmless as written - but it inverted an order that does matter, since
+`checked_span()` validates the price window and should run before the index allocates.
+
+The uncomfortable part is that a compiler flag found in one second what a careful audit did not.
+`-Wall -Wextra` is not in the default build. It should be.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
