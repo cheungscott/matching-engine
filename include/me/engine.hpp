@@ -47,11 +47,14 @@ public:
             return kRejected;
         }
 
-        const SeqNum  seq = next_seq_++;
-        const OrderId id  = next_id_++;
+        const SeqNum  arrival = next_seq_++;
+        const OrderId id      = next_id_++;
 
+        Quantity remaining = cmd.quantity;
         if (book_.crosses(cmd.side, cmd.price)) {
-            fill(cmd, id, seq, out);
+            fill(cmd, id, remaining, out);
+        }
+        if (remaining == 0) {
             return id;                      // fully filled; never rests
         }
 
@@ -65,8 +68,8 @@ public:
         resting->type        = cmd.type;
         resting->price       = cmd.price;
         resting->quantity    = cmd.quantity;
-        resting->remaining   = cmd.quantity;
-        resting->entry_seq   = seq;
+        resting->remaining   = remaining;   // what survived the fill loop
+        resting->entry_seq   = arrival;
         resting->participant = cmd.participant;
 
         book_.add(resting);
@@ -85,35 +88,52 @@ private:
         return true;
     }
 
-    // Phase 1: exactly one resting order, at one price, for the whole quantity.
-    void fill(const NewOrder& cmd, OrderId taker_id, SeqNum seq, std::vector<Trade>& out) {
-        const Side  opposite = (cmd.side == Side::Buy) ? Side::Sell : Side::Buy;
-        PriceLevel* level    = book_.best_level(opposite);
-        assert(level != nullptr && "crosses() said there was liquidity");
+    // Consume resting orders oldest-first while the incoming order still has
+    // quantity and still crosses. Decrements `remaining` in place.
+    //
+    // Phase 2: within ONE price level. Walking to the next level is Phase 3,
+    // and the assert below is that boundary.
+    void fill(const NewOrder& cmd, OrderId taker_id, Quantity& remaining,
+              std::vector<Trade>& out) {
+        const Side  opposite   = (cmd.side == Side::Buy) ? Side::Sell : Side::Buy;
+        const Price first_best = book_.best_level(opposite)->price();
 
-        Order* maker = level->front();
-        assert(maker != nullptr && "occupied cursor pointing at an empty level");
-        assert(maker->remaining == cmd.quantity &&
-               "Phase 1 handles exact full fills only; partial fills are Phase 2");
+        while (remaining > 0 && book_.crosses(cmd.side, cmd.price)) {
+            PriceLevel* level = book_.best_level(opposite);
+            assert(level != nullptr && "crosses() said there was liquidity");
+            assert(level->price() == first_best &&
+                   "Phase 2 fills within one level; walking levels is Phase 3");
 
-        // At the MAKER's price. The resting order set the terms; the aggressor
-        // accepted them, so the taker may receive price improvement.
-        out.push_back(Trade{
-            .seq      = seq,
-            .maker_id = maker->id,
-            .taker_id = taker_id,
-            .price    = maker->price,
-            .quantity = maker->remaining,
-        });
+            Order* maker = level->front();
+            assert(maker != nullptr && "cursor points at an empty level");
 
-        // Order matters: unlink subtracts maker->remaining from the level's
-        // cached total, so remaining must still be intact here (D9).
-        const Price price = maker->price;
-        level->unlink(maker);
-        if (level->empty()) {
-            book_.on_level_emptied(opposite, price);
+            const Quantity traded = (remaining < maker->remaining) ? remaining : maker->remaining;
+
+            // At the MAKER's price. The resting order set the terms; the
+            // aggressor accepted them, so the taker may take price improvement.
+            out.push_back(Trade{
+                .seq      = next_seq_++,
+                .maker_id = maker->id,
+                .taker_id = taker_id,
+                .price    = maker->price,
+                .quantity = traded,
+            });
+            remaining -= traded;
+
+            if (traded == maker->remaining) {
+                // Fully consumed. Unlink BEFORE releasing, and read the price
+                // before the slot is poisoned (D11).
+                const Price price = maker->price;
+                level->unlink(maker);
+                if (level->empty()) {
+                    book_.on_level_emptied(opposite, price);
+                }
+                pool_.release(maker);
+            } else {
+                // Partially consumed: it keeps its queue position (D12).
+                level->reduce_front(traded);
+            }
         }
-        pool_.release(maker);
     }
 
     OrderBook         book_;
