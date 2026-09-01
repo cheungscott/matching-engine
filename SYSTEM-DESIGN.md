@@ -1074,6 +1074,203 @@ the right direction, and it would have been quoted. **A number that flatters the
 deserves more scepticism than one that does not**, and the only reason this one was caught was
 running the benchmark a second time before writing it down.
 
+### D25 - Pre-ship adversarial audit: nine reachable defects, four of them same-day regressions
+**, 2026-09-01.** Three independent agents audited the code,
+the tests and the documentation before the v0.1 tag. Every finding below was **demonstrated** by
+the auditor with a running probe under ASan/UBSan, and then **re-verified against the source** here
+before being accepted. The ship was blocked on them.
+
+The uncomfortable headline: **the previous audit, one day earlier, missed all nine.** It looked for
+contradictions between the code and the design log. It did not ask "what happens if a caller does
+something the engine never does", and it did not consider exceptions at all.
+
+#### D25.1 - `OrderType` outside {Limit, Market} is a null-pointer WRITE
+
+The same field is classified five different ways, and they do not agree:
+
+| decision | predicate |
+|---|---|
+| reserve a pool slot | `type == Limit` |
+| validate price against the window | `type == Limit` |
+| normalise the logged price | `type == Market` |
+| never rest | `type == Market` |
+| **rest it** | **`!(type == Market)`** |
+
+`OrderType` is `enum class : uint8_t`, so `static_cast<OrderType>(2)` is a well-defined value. It
+reserves no slot, skips price validation, is not Market so misses the early return, and reaches the
+resting path with `slot == nullptr`. Under `-DNDEBUG`: `SEGV ... caused by a WRITE memory access`.
+
+**Reachable from this project's own parser** - `tests/scenario.hpp` does `static_cast<OrderType>()`
+on an integer parsed from text, so a malformed replay log crashes the engine. The scenario format
+is the thing designed to ingest external data (LOBSTER), which makes this the input path most
+likely to see hostile bytes.
+
+The lesson is the table above: **five predicates over one field, written across four phases, and no
+two phases checked each other.** Exactly D19's failure mode, in a form the D19 audit did not look
+for.
+
+#### D25.2 - The F4 fix caused a behaviour regression, and D19 costed it wrong
+
+`apply()` acquires a pool slot for every limit order **before** `fill()` runs. So at pool
+exhaustion, a marketable limit that would fully consume resting liquidity - and therefore *free*
+slots - is rejected. That is precisely the order a venue most wants at capacity. Demonstrated: the
+identical size sent as a Market order trades, while the limit is refused.
+
+D19 states the cost of reserve-first as *"one acquire/release pair on the fully-filled path, and
+both are pointer bumps"*. That sentence is true and it is not the whole cost. **It described the
+cost in the common case and never asked what the change does at the boundary the change was about.**
+
+`conservation_survives_pool_exhaustion` was written specifically to exercise exhaustion and did not
+catch it, because it checks conservation - which holds fine - and not whether the rejection was
+*correct*.
+
+#### D25.3 - A throwing `EventSink` calls `std::terminate`
+
+`emit()` is `noexcept`; `EventSink::publish()` is not. Any exception crossing that boundary
+terminates the process. Not exotic: the shipped `VectorSink::publish` does `push_back`, so a
+`bad_alloc` from the *test* sink kills the process. D23 documents that `VectorSink` reallocates
+unboundedly and analysed it as a **latency** problem, never noticing the failure mode is
+termination.
+
+#### D25.4 - A throwing caller vector permanently leaks a pool slot
+
+`slot` is a raw local. `fill()` calls `out.push_back()` on the **caller's** vector, which can throw.
+The exception propagates out of `apply()` and the slot is never returned: `check_invariants()` goes
+false and stays false, and repeating it drains the pool. `Engine::apply` had no exception safety
+story at all, and nobody had asked for one.
+
+#### D25.5 - `retire()` releases the slot even when the book refused it
+
+D19/F6 recorded this as *"Now asserted"*. **An assert is not a fix under `NDEBUG`**, which is the
+build that ships and the build that is measured. If `book_.remove()` returns false the release
+happens anyway, freeing an order still linked into a level and still in the id index. Demonstrated:
+`apply(Cancel)` returns **true** while leaving a dangling pointer in both, then ASan reports
+use-after-poison through the index.
+
+This is D8's own rule - *unconditional for memory corruption, assert for logic errors* - broken at
+the call site that D19 wrote specifically to honour it.
+
+#### D25.6 - `const OrderBook&` hands out a mutable `Order*`
+
+`find()` is a const method returning a non-const pointer. D23 made `Engine::book()` const-only with
+the comment *"a mutable handle lets a caller add or remove behind retire()'s back"*. `find()`
+reopens exactly that door, one call later. Demonstrated: mutate `o->price` through the const
+handle, then cancel - the order is unlinked from a level that does not contain it, corrupting that
+level's links while remaining linked in its real one.
+
+**Making the accessor const did not make the object const**, and the entry claiming otherwise was
+written the same day.
+
+#### D25.7 - `Quantity` is unbounded, and the invariant checker is structurally blind to it
+
+`validate()` rejects only `quantity == 0`. Two orders of `2^63` at one price wrap
+`total_quantity_`, and `depth_at()` then reports **0** while `2^64` rests - corrupt L2 market data
+from two well-formed orders.
+
+Worse: `check_invariants()` returns **true** throughout, because `PriceLevel::is_consistent()`
+recomputes the sum with the *same* wrapping `uint64` arithmetic and therefore agrees with the
+corrupted cache by construction. **A checker that recomputes a value the same way it was computed
+cannot detect an arithmetic fault in that computation** - the same independence argument D22 made
+for conservation, unapplied here.
+
+#### D25.8 - `add()` accepts `id == 0` and permanently corrupts the index
+
+`IdIndex` uses `id == 0` as its EMPTY marker; `Engine::kRejected` is also 0. `OrderBook::add()`
+validates the price unconditionally - with a comment about D8's rule being *"applied in ObjectPool
+and nowhere else"* - and then does not apply that rule to the id one line later. Under `-DNDEBUG`
+the slot is written but still reads as empty, so it is never consumed while `count_` increments:
+the order becomes unremovable, the pool slot leaks, and `count_` drifts past the load-factor bound,
+which is the precondition for D25.9.
+
+#### D25.9 - `IdIndex`'s probe loops are unbounded and HANG when the table fills
+
+All three of `find`/`insert`/`erase` are `for(;;)` linear probes relying on an always-present empty
+slot. The load-factor guarantee is an **`assert`**, deleted under `NDEBUG`, and
+`OrderBook`'s `max_resting` **defaults to `1 << 16`** with no relation to any pool. Demonstrated
+with `max_resting = 2`: a lookup of a missing id spins forever.
+
+A hang is the worst failure mode a trading process has - no crash, no log, no core, and the
+watchdog is the only thing that notices. D19 argued the sizing is safe because *"the pool says so"*,
+which is true of `Engine` and is **a comment, not a mechanism**: `OrderBook` and `IdIndex` are
+public types with a default that silently disagrees.
+
+#### What the nine have in common
+
+Two things, and neither is "a bug was written":
+
+1. **Every guard that mattered was an `assert`.** D8 established the rule - unconditional for
+   corruption, assert for logic errors - and D19 was written to apply it. Six of the nine are that
+   rule not applied: the load factor, the id sentinel, `retire()`'s report, `reduce_front`,
+   `push_back`'s precondition, the `resting != nullptr` claim. The rule was known, logged, cited,
+   and unevenly applied.
+2. **Nobody had considered exceptions.** `Engine::apply` can throw from three places and has no
+   cleanup on any path. This was not an oversight in one function; there was no exception-safety
+   position anywhere in the design log to be inconsistent with.
+
+### D26 - The claims audit: what the documentation said that the code did not
+**, 2026-09-01.**
+
+A separate agent extracted every checkable factual claim from `README.md`, `SYSTEM-DESIGN.md`,
+`WORKING-RULES.md` and the vault status note, and verified each against the code and a re-run of every
+benchmark on the same machine. This matters more than usual because those documents are the source
+for CV and interview copy.
+
+#### The measurements did not reproduce
+
+| claim | documented | re-measured |
+|---|---|---|
+| `cancel, hit` p50 | 87 ns | 176, 128 ns |
+| `cancel, unknown` p50 | 35 ns | 83, 74 ns |
+| throughput | 12.9 M ops/sec | 11.3, 12.2 M |
+| baseline cancel ratio @16k | **92x** | 86.8, 85.2, 74.1, 76.2 |
+| default suite runtime | 1.3 s | 2.8-3.1 s |
+| run-to-run p99.9 spread | "roughly 5%" | 13-42% |
+
+The `add` rows reproduce well; the `cancel` rows do not, which is the worst possible split given
+that the entire positioning argument is *cancels are 90%+ of message traffic*.
+
+**The 92x was the median of three runs that were 54.8, 92.9 and 95.6.** The median was computed
+correctly. The error was quoting a point estimate at all from a sample with that spread, and doing
+it in bold. This is the third instance of the same bias in one day, after D18's p50 headline and
+D24's near-miss 4,159x - and it happened *after* the rule was written down.
+
+**Root cause, and the actual fix:** `bench_baseline` runs each depth **once** per invocation, so
+"medians of 3 runs" was something done by hand and recorded nowhere. `bench_latency` does its 5-run
+median **inside the binary**, which is why its numbers held up better. Methodology that lives in
+the operator's head is not methodology. The rig now does its own repetition.
+
+#### The documentation was wrong about the code
+
+- *"**Four** allocations at construction"* - it is **five** (`levels_`, `occupied_`, `IdIndex::table_`,
+  `slab_`, `next_free_`). The sentence lists four items and then adds a fifth in the same breath.
+  D23 exists to correct an earlier claim of "two". **The correction was also wrong.**
+- *"depth at every price compared after each operation"* - the depth sweep runs **once, after** the
+  100k loop. Per-operation depth comparison happens only in the two small non-gate cases.
+- *"every trade field"* - `seq` is deliberately excluded. D13 documents the exclusion; the summaries
+  dropped the qualifier.
+- *"abort rather than report"* - `bench_profile` prints its results line and *then* checks. It
+  reports first and flags second.
+- *"shares no code with the engine, and therefore cannot share a bug"* - `naive_book.hpp` includes
+  `me/engine.hpp` and uses its value types. It shares no *matching, storage or indexing* logic,
+  which is the load-bearing claim; "shares no code" is literally false and is an easy gotcha.
+- *"the engine's stays flat"* - contradicted by the table printed directly above it: 30.0 → 39.6 →
+  56.1 ns, an 87% rise.
+- *"seven invariants across ~1.1M operations"* - the 1M-op case checks **log properties only**. The
+  invariants and the differential run over the 100k case. D16 states the split correctly; all three
+  summaries compressed it.
+- *"O(1) cancel"* - true for the lookup and unlink, but a cancel that empties the best level scans
+  the occupancy bitmap at O(range/64). D20 says this honestly; the summaries dropped it.
+
+#### The provenance claim was false in both halves
+
+The vault status said *"every file carries that provenance and so does every commit"*, in the
+document whose stated purpose is interview honesty. Actually **4 of 20 files** and **5 of 26
+commits**, with no `Co-Authored-By` trailer anywhere.
+
+That is the finding an interviewer can check in ten seconds, and it is the one where being caught
+costs the most - because the sentence is *about* not overstating. Fixed by making it true rather
+than by softening it.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
