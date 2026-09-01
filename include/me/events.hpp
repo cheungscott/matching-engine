@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -84,23 +85,26 @@ private:
 // iteration. Every value here is either a counter or a field the caller sent.
 inline std::string to_line(const Event& e) {
     auto num = [](auto v) { return std::to_string(static_cast<std::uint64_t>(v)); };
+    // std::to_underlying (C++23) rather than a hand-written cast: it cannot pick
+    // the wrong type if an enum's underlying type changes, and this is exactly
+    // the log-serialisation use Blueprint §7 named it for.
+    auto enum_num = [](auto e) { return std::to_string(std::to_underlying(e)); };
 
     if (const auto* a = std::get_if<OrderAccepted>(&e)) {
         return "ACC " + num(a->seq) + ' ' + num(a->id) + ' '
-             + num(static_cast<std::uint8_t>(a->side)) + ' '
-             + num(static_cast<std::uint8_t>(a->type)) + ' '
+             + enum_num(a->side) + ' '
+             + enum_num(a->type) + ' '
              + std::to_string(a->price) + ' ' + num(a->quantity);
     }
     if (const auto* r = std::get_if<OrderRejected>(&e)) {
-        return "REJ " + num(r->seq) + ' ' + num(static_cast<std::uint8_t>(r->reason));
+        return "REJ " + num(r->seq) + ' ' + enum_num(r->reason);
     }
     if (const auto* t = std::get_if<TradeExecuted>(&e)) {
         return "TRD " + num(t->seq) + ' ' + num(t->maker_id) + ' ' + num(t->taker_id) + ' '
              + std::to_string(t->price) + ' ' + num(t->quantity);
     }
     const auto* c = std::get_if<OrderCancelled>(&e);
-    return "CXL " + num(c->seq) + ' ' + num(c->id) + ' '
-         + num(static_cast<std::uint8_t>(c->reason));
+    return "CXL " + num(c->seq) + ' ' + num(c->id) + ' ' + enum_num(c->reason);
 }
 
 inline std::string to_log(const std::vector<Event>& events) {
