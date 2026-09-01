@@ -166,6 +166,7 @@ std::vector<Command> make_workload(std::size_t n, unsigned seed) {
 }
 
 struct RunResult {
+    double              raw_ops_per_sec = 0.0;   // measured with the timing removed
     std::vector<Sample> samples;
     double              ops_per_sec = 0.0;
 };
@@ -219,6 +220,35 @@ RunResult one_run(const std::vector<Command>& warm, const std::vector<Command>& 
 
     const double secs = std::chrono::duration<double>(wall).count();
     out.ops_per_sec = static_cast<double>(measured.size()) / secs;
+
+    // D27/1.18 — the number above is NOT this engine's throughput. The timed region
+    // contains two rdtscp+lfence pairs and a push_back per operation, and lfence is a
+    // serialising instruction: measured, roughly HALF of the reported figure was the
+    // instrument. The latency block carried three caveats and the throughput line
+    // carried none, which made it the most quotable and least qualified number in the
+    // report.
+    //
+    // So throughput is measured again on a fresh engine over the same commands with
+    // no per-operation timing at all. Both are printed, because the gap between them
+    // is itself the finding.
+    {
+        Engine             raw(9'000, 11'000, 1 << 20);
+        std::vector<Trade> rt;
+        rt.reserve(4096);
+        for (const Command& c : warm) {
+            rt.clear();
+            if (c.is_cancel) raw.apply(Cancel{c.cancel_id});
+            else             raw.apply(c.order, rt);
+        }
+        const auto s0 = Clock::now();
+        for (const Command& c : measured) {
+            rt.clear();
+            if (c.is_cancel) raw.apply(Cancel{c.cancel_id});
+            else             raw.apply(c.order, rt);
+        }
+        const double raw_secs = std::chrono::duration<double>(Clock::now() - s0).count();
+        out.raw_ops_per_sec = static_cast<double>(measured.size()) / raw_secs;
+    }
     return out;
 }
 
@@ -305,6 +335,7 @@ int main() {
     std::vector<std::vector<std::vector<std::uint64_t>>> pct_kind(kKinds);
     std::vector<std::size_t> n_kind(kKinds, 0);
     std::vector<double>      throughputs;
+    std::vector<double>      raw_throughputs;
 
     auto five = [](std::vector<std::uint64_t>& v) {
         std::sort(v.begin(), v.end());
@@ -316,6 +347,7 @@ int main() {
     for (int r = 0; r < kRuns; ++r) {
         const RunResult res = one_run(warm, measured);
         throughputs.push_back(res.ops_per_sec);
+        raw_throughputs.push_back(res.raw_ops_per_sec);
 
         std::vector<std::vector<std::uint64_t>> bucket(kKinds);
         std::vector<std::uint64_t> everything;
@@ -344,7 +376,12 @@ int main() {
         auto ns = [&](std::size_t which) {
             return static_cast<double>(median_of(runs, which)) / tsc_per_ns;
         };
-        std::printf("  %-18s n=%-8zu p99.9=%8.0f  p99=%7.0f  max=%9.0f   (p90=%5.0f p50=%5.0f)\n",
+        // D27/R13 — n is the POOLED sample count across all runs, while every
+        // percentile beside it is a median of per-run percentiles. Labelled n(all) so
+        // the two are not read as coming from the same population.
+        // D27/R12 — max is the median of the five per-run maxima, which is not a
+        // maximum of anything and silently discards the worst observation. Labelled.
+        std::printf("  %-18s n(all)=%-8zu p99.9=%8.0f  p99=%7.0f  medmax=%9.0f   (p90=%5.0f p50=%5.0f)\n",
                     label, n, ns(3), ns(2), ns(4), ns(1), ns(0));
     };
 
@@ -362,7 +399,14 @@ int main() {
     }
 
     std::sort(throughputs.begin(), throughputs.end());
-    std::printf("\nTHROUGHPUT\n  median %.2f M ops/sec across %d runs\n",
+    std::sort(raw_throughputs.begin(), raw_throughputs.end());
+    std::printf("\nTHROUGHPUT\n");
+    std::printf("  %.2f M ops/sec  <- QUOTE THIS: same workload, per-operation timing removed\n",
+                raw_throughputs[raw_throughputs.size() / 2] / 1e6);
+    std::printf("  the figure below is what the TIMED loop achieved. The gap is the\n");
+    std::printf("  instrument: two rdtscp+lfence pairs per operation, and lfence\n");
+    std::printf("  serialises. Reporting it as throughput would understate by ~2x.\n");
+    std::printf("  instrumented: median %.2f M ops/sec across %d runs\n",
                 throughputs[throughputs.size() / 2] / 1e6, kRuns);
 
     std::printf("\nREAD THIS BEFORE QUOTING ANY NUMBER ABOVE\n");

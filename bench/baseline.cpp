@@ -36,9 +36,13 @@ namespace {
 // Same rdtscp pair bench_latency uses; see D17 for why not steady_clock.
 inline std::uint64_t tsc_now() noexcept {
 #if defined(__x86_64__)
+    // D27/R9 — the comment says "same rdtscp pair bench_latency uses" and the fence
+    // order was reversed. rdtscp already waits for prior instructions to retire; the
+    // lfence goes AFTER, to stop later instructions being hoisted above the read.
     unsigned aux;
+    const std::uint64_t t = __rdtscp(&aux);
     _mm_lfence();
-    return __rdtscp(&aux);
+    return t;
 #else
     return 0;
 #endif
@@ -219,6 +223,12 @@ int main() {
     std::printf("    cancel scans O(n) where the id index is O(1), so cxl should climb\n");
     std::printf("    while add stays roughly flat.\n");
     std::printf("  · Not a pinned-core measurement. Same caveat as bench_latency.\n");
+    std::printf("  · About a FIFTH of the cancels miss (ids are drawn with\n");
+    std::printf("    replacement, so many target an already-cancelled order). In\n");
+    std::printf("    NaiveBook a hit scans half the population on average and a MISS\n");
+    std::printf("    scans both maps in full, so the miss share inflates the ratio\n");
+    std::printf("    below. Stated because the header used to say the scan pays its\n");
+    std::printf("    average, and a fifth of them pay the maximum.\n");
     std::printf("  · NaiveBook is deliberately dumb. This is not a claim about\n");
     std::printf("    std::map, it is a claim about THIS design against the obvious one.\n");
     std::printf("  · Engine cancel is NOT flat with depth: it grows sub-linearly,\n");
