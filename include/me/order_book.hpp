@@ -256,6 +256,13 @@ public:
         return counted == by_id_.count_live() && counted == by_id_.size();
     }
 
+    // Test hook (tests/mutation.hpp). Several clauses of this class's consistency
+    // check guard PRIVATE state that no public API can corrupt, and a checker that
+    // never fails proves nothing: without this friend, no test could plant the
+    // violation each of those clauses exists to catch. Declared here, defined only in
+    // the test build.
+    friend struct Probe;
+
 private:
     static constexpr std::size_t kNoLevel = ~std::size_t{0};
 

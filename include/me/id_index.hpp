@@ -104,6 +104,11 @@ public:
         return n;
     }
 
+    // Test hook — see tests/mutation.hpp. count_ has to be corruptible for
+    // OrderBook::is_consistent()'s cardinality clause to be shown to fire, and the
+    // clustering test reads the private probe chain.
+    friend struct Probe;
+
 private:
     struct Slot {
         OrderId id   = kEmpty;

@@ -101,6 +101,13 @@ public:
     // Not empty(): PriceLevel::empty() means "holds nothing", this is its opposite.
     [[nodiscard]] bool exhausted() const noexcept { return free_head_ == kNil; }
 
+    // Test hook (tests/mutation.hpp). Several clauses of this class's consistency
+    // check guard PRIVATE state that no public API can corrupt, and a checker that
+    // never fails proves nothing: without this friend, no test could plant the
+    // violation each of those clauses exists to catch. Declared here, defined only in
+    // the test build.
+    friend struct Probe;
+
     // Acyclic, and exactly available() long. O(capacity) — tests and the engine's
     // check_invariants(), never the hot path.
     [[nodiscard]] bool free_list_is_consistent() const noexcept {
