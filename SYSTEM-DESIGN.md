@@ -110,6 +110,22 @@ costs nothing.
   book.
 
 ### D7 - Order layout: one cache line, aligned, Blueprint field order (Phase 1)
+> **CORRECTED 2026-09-01, re-measured with `offsetof`.** Two errors in the prose below.
+> (1) *"A 32-bit `price` drops straight into that gap"* is not what happens. `price` is at
+> offset **12**, so the 2 padding bytes at 10-11 remain padding; a 4-byte value cannot start
+> at offset 10. What it actually does is **share the 8-byte slot spanning bytes 8-15** with
+> `side` and `type` rather than claiming its own slot. Same result, different mechanism.
+> (2) The `ParticipantId` narrowing **buys zero bytes**. Measured: `int32` price with a
+> `uint64` participant is still 64; `int64` price with a `uint32` participant is still 72.
+> **`Price` is the only field whose width decides the cache line.** The recorded assumption
+> "fewer than 4.3e9 distinct participants" is therefore being paid for nothing. Harmless, but
+> it is not load-bearing the way the price range assumption is, and it should not be defended
+> as if it were.
+>
+> Related cost, worth stating together with the benefit: **F5's signed overflow in
+> `checked_span` exists only because `Price` is 32-bit.** Narrowing bought one memory fetch
+> per order touch and cost one arithmetic hazard at the range boundary. Both are now on the
+> record; the trade still favours narrowing.
 
 - **Chosen:** `Price` -> `int32_t`, `ParticipantId` -> `uint32_t`, `SeqNum` stays
   `uint64_t`, `alignas(64)` on `Order`, Blueprint §3.5 field order kept, and two
