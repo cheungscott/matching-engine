@@ -51,11 +51,17 @@ public:
         const OrderId id      = next_id_++;
 
         Quantity remaining = cmd.quantity;
-        if (book_.crosses(cmd.side, cmd.price)) {
-            fill(cmd, id, remaining, out);
-        }
+        fill(cmd, id, remaining, out);
+
         if (remaining == 0) {
             return id;                      // fully filled; never rests
+        }
+
+        // A market order NEVER rests: it wanted liquidity now, not a queue
+        // position. Whatever it could not fill is cancelled. Blueprint §6.1
+        // emits OrderCancelled{NoLiquidity} here; events arrive in Phase 6.
+        if (cmd.type == OrderType::Market) {
+            return id;
         }
 
         Order* resting = pool_.acquire();
@@ -82,27 +88,33 @@ public:
 
 private:
     [[nodiscard]] bool validate(const NewOrder& cmd) const noexcept {
-        if (cmd.quantity == 0)             return false;
-        if (cmd.type != OrderType::Limit)  return false;   // Market is Phase 3
-        if (!book_.in_range(cmd.price))    return false;   // the bounded-array reject
+        if (cmd.quantity == 0) return false;
+        // A market order carries no meaningful price, so the tick-window check
+        // applies only to limits.
+        if (cmd.type == OrderType::Limit && !book_.in_range(cmd.price)) return false;
         return true;
     }
 
-    // Consume resting orders oldest-first while the incoming order still has
-    // quantity and still crosses. Decrements `remaining` in place.
-    //
-    // Phase 2: within ONE price level. Walking to the next level is Phase 3,
-    // and the assert below is that boundary.
+    // Can this order trade against what is resting right now?
+    // A limit crosses on price; a market takes whatever exists at any price.
+    [[nodiscard]] bool can_match(const NewOrder& cmd) const noexcept {
+        const bool opposite_has_liquidity =
+            (cmd.side == Side::Buy) ? book_.best_ask().has_value()
+                                    : book_.best_bid().has_value();
+        if (cmd.type == OrderType::Market) return opposite_has_liquidity;
+        return book_.crosses(cmd.side, cmd.price);
+    }
+
+    // Consume resting orders oldest-first, walking outward through price levels,
+    // while the incoming order still has quantity and can still trade.
+    // Decrements `remaining` in place.
     void fill(const NewOrder& cmd, OrderId taker_id, Quantity& remaining,
               std::vector<Trade>& out) {
-        const Side  opposite   = (cmd.side == Side::Buy) ? Side::Sell : Side::Buy;
-        const Price first_best = book_.best_level(opposite)->price();
+        const Side opposite = (cmd.side == Side::Buy) ? Side::Sell : Side::Buy;
 
-        while (remaining > 0 && book_.crosses(cmd.side, cmd.price)) {
+        while (remaining > 0 && can_match(cmd)) {
             PriceLevel* level = book_.best_level(opposite);
-            assert(level != nullptr && "crosses() said there was liquidity");
-            assert(level->price() == first_best &&
-                   "Phase 2 fills within one level; walking levels is Phase 3");
+            assert(level != nullptr && "can_match() said there was liquidity");
 
             Order* maker = level->front();
             assert(maker != nullptr && "cursor points at an empty level");

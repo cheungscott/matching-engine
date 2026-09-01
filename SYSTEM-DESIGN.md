@@ -341,6 +341,55 @@ assert.
 **Still an assert rather than unconditional**, consistent with D8: under NDEBUG a walk would produce
 a wrong fill, which is data corruption rather than memory corruption.
 
+### D13 - Walk levels, market orders, and the NaiveBook oracle (Phase 3)
+**, 2026-09-01.**
+
+**The walk** is the Phase 2 assert deleted. The loop was already general: `crosses()` re-evaluates
+against the cursor and `on_level_emptied()` advances it, so the sweep across levels falls out with
+no new code. That was the point of writing it in general form and gating it with an assert.
+
+**Market orders.** `can_match()` splits the predicate - a limit crosses on price, a market takes
+whatever exists at any price. A market order **never rests**, because it wanted immediacy rather
+than a queue position, so an unfillable remainder is cancelled. Blueprint §6.1 emits
+`OrderCancelled{NoLiquidity}` there; events arrive in Phase 6, so for now the behaviour is right and
+the record is missing. `validate()` skips the tick-window check for markets, whose price field is
+meaningless.
+
+**`OrderBook::depth_at(Price)`** added: aggregate resting quantity at a price. That is L2 market
+data, and it is O(1) precisely because `PriceLevel` caches its total. The oracle needs it to compare
+book state rather than only trades.
+
+### The oracle - `tests/naive_book.hpp`
+
+A deliberately obvious `std::map<Price, std::vector<Resting>>` per side. No pool, no cursors, no
+intrusive links, no sentinels. Slow, allocation-happy, checkable by eye.
+
+**Its job is to disagree with the real book when the real book is wrong**, so every optimisation
+removed from it is a bug it can still catch. Keep it after Phase 3: it is also the performance
+baseline for the Module 4 write-up, which converts the tick-array and pool choices from asserted to
+measured at near-zero extra cost.
+
+**The differential runner** feeds identical command streams to both and compares after EVERY
+operation: returned id, trade count, and each trade's maker, taker, price and quantity; then
+`best_bid`, `best_ask`, and depth at all 21 prices; then `book().is_consistent()`. 2000 operations,
+about 59,000 assertions, 0.2 seconds.
+
+- **Fixed seed (20260901)**, so a failure is replayable rather than a story about a run that once
+  went wrong.
+- **Narrow price band (98-104)** against a 90-110 book, so orders actually cross instead of resting
+  past each other. A fuzz that never trades tests nothing.
+- **8% market orders** - enough to exercise the sweep-and-cancel path without starving the book.
+- **`seq` is excluded** from the comparison: it is an event-numbering scheme, not a matching
+  outcome, and NaiveBook does not model the engine's counter. Everything constituting *what
+  happened* is compared.
+- **Pool capacity 8192**, so exhaustion never fires. The engine would return `kRejected` where
+  NaiveBook, having no pool, rests the order - a real design difference between the two, not a bug,
+  and the fuzz is not the place to explore it.
+
+**What this protects.** Phases 4-7 each add a command type or an optimisation, and every one gets
+diffed against an implementation that shares no code and therefore cannot share a bug. That is a
+far stronger claim than any hand-written test, which only covers what its author thought of.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)

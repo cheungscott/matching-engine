@@ -23,7 +23,11 @@
 #include "me/price_level.hpp"
 #include "me/types.hpp"
 
+#include "naive_book.hpp"
+
 #include <catch2/catch_test_macros.hpp>
+
+#include <random>
 
 using namespace me;
 
@@ -669,4 +673,181 @@ TEST_CASE("engine_pool_returns_every_fully_consumed_maker", "[phase2][engine]") 
 
     CHECK(eng.pool().in_use() == std::size_t{0});   // maker returned, taker never rested
     CHECK(eng.pool().free_list_is_consistent());
+}
+
+// ===========================================================================
+//  PHASE 3 — walk levels, market orders, and the differential oracle
+// ===========================================================================
+
+TEST_CASE("engine_walks_two_price_levels", "[phase3][engine]") {
+    // The sweep from the Module 1 worked example: 250 resting at 102, 200 at
+    // 103, and a buy for 300 at limit 103.
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId a3 = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                          .price = 102, .quantity = 100, .participant = 1}, trades);
+    const OrderId a4 = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                          .price = 102, .quantity = 150, .participant = 1}, trades);
+    const OrderId a5 = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                          .price = 103, .quantity = 200, .participant = 1}, trades);
+
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 103, .quantity = 300, .participant = 2}, trades);
+
+    REQUIRE(trades.size() == 3);
+    CHECK(trades[0].maker_id == a3);  CHECK(trades[0].price == Price{102});
+    CHECK(trades[0].quantity == Quantity{100});
+    CHECK(trades[1].maker_id == a4);  CHECK(trades[1].price == Price{102});
+    CHECK(trades[1].quantity == Quantity{150});
+    CHECK(trades[2].maker_id == a5);  CHECK(trades[2].price == Price{103});
+    CHECK(trades[2].quantity == Quantity{50});   // level 102 exhausted, cursor advanced
+
+    REQUIRE(eng.book().best_ask().has_value());
+    CHECK(*eng.book().best_ask() == Price{103});       // 150 of a5 left
+    CHECK(eng.book().depth_at(102) == Quantity{0});
+    CHECK(eng.book().depth_at(103) == Quantity{150});
+    CHECK(eng.book().is_consistent());
+}
+
+TEST_CASE("engine_price_improvement_across_the_sweep", "[phase3][engine]") {
+    // Willing to pay 104, but every fill prints at the resting price.
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 101, .quantity = 50, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 102, .quantity = 50, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 104, .quantity = 100, .participant = 2}, trades);
+
+    REQUIRE(trades.size() == 2);
+    CHECK(trades[0].price == Price{101});    // NOT 104
+    CHECK(trades[1].price == Price{102});
+    CHECK(eng.book().is_consistent());
+}
+
+TEST_CASE("engine_market_order_sweeps_and_never_rests", "[phase3][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 102, .quantity = 40, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 105, .quantity = 40, .participant = 1}, trades);
+
+    // Wants 200, only 80 exists. Takes it all and cancels the rest.
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+                       .price = 0, .quantity = 200, .participant = 2}, trades);
+
+    REQUIRE(trades.size() == 2);
+    CHECK(trades[0].price == Price{102});
+    CHECK(trades[1].price == Price{105});      // walked past the spread, any price
+    CHECK_FALSE(eng.book().best_ask().has_value());
+    CHECK_FALSE(eng.book().best_bid().has_value());   // the remainder did NOT rest
+    CHECK(eng.book().is_consistent());
+}
+
+TEST_CASE("engine_market_order_into_an_empty_book", "[phase3][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+                                          .price = 0, .quantity = 100, .participant = 1}, trades);
+
+    CHECK(id != Engine::kRejected);          // accepted, then cancelled for no liquidity
+    CHECK(trades.empty());
+    CHECK_FALSE(eng.book().best_bid().has_value());
+    CHECK(eng.pool().in_use() == std::size_t{0});
+}
+
+TEST_CASE("engine_boundary_at_or_better_includes_equal", "[phase3][engine]") {
+    // The one-character bug, checked in both directions.
+    Engine eng(kMin, kMax, 64);
+
+    SECTION("sell into a bid at exactly the same price") {
+        std::vector<Trade> trades;
+        eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                           .price = 101, .quantity = 100, .participant = 1}, trades);
+        eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                           .price = 101, .quantity = 100, .participant = 2}, trades);
+        REQUIRE(trades.size() == 1);
+        CHECK(trades[0].price == Price{101});
+        CHECK_FALSE(eng.book().best_bid().has_value());
+    }
+
+    SECTION("one tick away does NOT cross") {
+        std::vector<Trade> trades;
+        eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                           .price = 100, .quantity = 100, .participant = 1}, trades);
+        eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                           .price = 101, .quantity = 100, .participant = 2}, trades);
+        CHECK(trades.empty());
+        CHECK(*eng.book().best_bid() == Price{100});
+        CHECK(*eng.book().best_ask() == Price{101});
+        CHECK(eng.book().is_consistent());
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  The differential test. Blueprint §9.3: highest value-per-line in the project.
+//
+//  Feed identical command streams to the real engine and to a deliberately
+//  obvious std::map implementation, and compare after EVERY operation. Any
+//  disagreement is a bug in one of them, and the naive one is the one you can
+//  check by eye.
+//
+//  `seq` is excluded from the comparison: it is an event-numbering scheme, not
+//  a matching outcome, and NaiveBook does not model the engine's counter.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("differential_engine_matches_the_naive_book", "[phase3][oracle]") {
+    constexpr Price kLo = 98;      // narrow band so orders actually cross
+    constexpr Price kHi = 104;
+    constexpr int   kOps = 2000;
+
+    Engine            real(kMin, kMax, 8192);
+    naive::NaiveBook  ref(kMin, kMax);
+
+    std::mt19937 rng(20260901u);   // fixed seed: a failing run must be replayable
+    std::uniform_int_distribution<int> price_of(kLo, kHi);
+    std::uniform_int_distribution<int> qty_of(1, 200);
+    std::uniform_int_distribution<int> roll(0, 99);
+
+    for (int op = 0; op < kOps; ++op) {
+        const int r = roll(rng);
+        NewOrder cmd{
+            .side        = (r % 2 == 0) ? Side::Buy : Side::Sell,
+            .type        = (r < 8) ? OrderType::Market : OrderType::Limit,
+            .price       = static_cast<Price>(price_of(rng)),
+            .quantity    = static_cast<Quantity>(qty_of(rng)),
+            .participant = 1,
+        };
+
+        std::vector<Trade> got;
+        std::vector<Trade> want;
+        const OrderId got_id  = real.apply(cmd, got);
+        const OrderId want_id = ref.apply(cmd, want);
+
+        INFO("diverged at operation " << op);
+        REQUIRE(got_id == want_id);
+        REQUIRE(got.size() == want.size());
+        for (std::size_t i = 0; i < got.size(); ++i) {
+            REQUIRE(got[i].maker_id == want[i].maker_id);
+            REQUIRE(got[i].taker_id == want[i].taker_id);
+            REQUIRE(got[i].price    == want[i].price);
+            REQUIRE(got[i].quantity == want[i].quantity);
+        }
+
+        REQUIRE(real.book().best_bid() == ref.best_bid());
+        REQUIRE(real.book().best_ask() == ref.best_ask());
+        for (Price p = kMin; p <= kMax; ++p) {
+            REQUIRE(real.book().depth_at(p) == ref.depth_at(p));
+        }
+        REQUIRE(real.book().is_consistent());
+    }
+
+    // The pool must not have leaked a slot across 2000 operations.
+    REQUIRE(real.pool().free_list_is_consistent());
 }

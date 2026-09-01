@@ -92,6 +92,12 @@ public:
     [[nodiscard]] Price min_price() const noexcept { return min_price_; }
     [[nodiscard]] Price max_price() const noexcept { return max_price_; }
 
+    // Aggregate resting quantity at one price — this is L2 market data, and the
+    // cached level total is what makes it O(1) rather than a walk.
+    [[nodiscard]] Quantity depth_at(Price p) const noexcept {
+        return in_range(p) ? levels_[index_of(p)].total_quantity() : 0;
+    }
+
     // Does an incoming order at this price cross the opposite side?
     // "At or better" INCLUDES equal — the one-character bug (Blueprint §4.6).
     [[nodiscard]] bool crosses(Side side, Price price) const noexcept {
