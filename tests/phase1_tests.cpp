@@ -1,12 +1,17 @@
-// tests/phase1_tests.cpp — the acceptance suite.
+// tests/phase1_tests.cpp — engine acceptance suite.
 //
-// Written test-first: every one fails against the stub bodies in
-// include/me/*.hpp until the engine is implemented.
+// Tags filter by area: [pool] [level] [book] [engine] [oracle] [events] [replay]
+// [regression] [plants] [fuzz]. The three most expensive cases are also tagged
+// [.gate], which hides them from a plain run; `engine_tests "[gate]"` runs them, and
+// CMake registers that command as the `fuzz_gate` test.
 //
-// Acceptance criteria:
-//   ObjectPool<Order> · PriceLevel intrusive list · OrderBook add + BBO cursors
-//   · apply(NewOrder) for rest-on-empty and exact full-fill at one price
-//   · unit tests green · ASan clean
+// Acceptance criteria covered here:
+//   ObjectPool slot discipline, PriceLevel intrusive list, OrderBook add and BBO cursors
+//   Engine::apply: matching, partial fills, FIFO within a level, sweeps, market orders
+//   Cancel by id, the id index and check_invariants()
+//   Differential tests against NaiveBook, the sequenced event log and replay
+//   Log properties, conservation, and planted violations for every checker
+//   Regression tests, one per demonstrated defect, and the fuzz gate
 //
 // Build (Catch2 arrives via CMake FetchContent; run from WSL/Linux):
 //   cmake --preset debug
@@ -14,10 +19,9 @@
 //   ctest --preset all       everything, the fuzz gate included (several minutes)
 //   ctest --preset fast      the edit loop, gate excluded
 //
-// The Debug config is the one that counts: it carries ASan/UBSan. A green suite
-// under a MinGW build verifies logic only; only the sanitized Linux build
-// verifies that the pointer surgery did not corrupt memory, and this suite is
-// exactly where the first dangling Order* shows up.
+// The debug preset builds with ASan and UBSan, and only that sanitized build verifies
+// that the pointer surgery does not corrupt memory. A green run without the sanitizers
+// verifies logic only.
 //
 
 #include "me/engine.hpp"
@@ -552,4 +556,126 @@ TEST_CASE("engine_attributes_maker_and_taker", "[phase1][engine]") {
         CHECK(trades[0].maker_id == maker);
         CHECK(trades[0].taker_id == taker);
     }
+}
+
+// ===========================================================================
+//  Partial fills, FIFO within a level, level sums
+// ===========================================================================
+
+TEST_CASE("level_reduce_front_keeps_position_and_total", "[phase2][level]") {
+    PriceLevel lvl(102);
+    Order a = make_order(1, Side::Sell, 102, 100, 1);
+    Order b = make_order(2, Side::Sell, 102, 150, 2);
+    lvl.push_back(&a);
+    lvl.push_back(&b);
+
+    lvl.reduce_front(40);
+
+    CHECK(lvl.front() == &a);                       // it did nothing to lose its place
+    CHECK(a.remaining == Quantity{60});
+    CHECK(lvl.total_quantity() == Quantity{210});   // 250 - 40, invariant 4
+    CHECK(lvl.is_consistent());
+}
+
+TEST_CASE("engine_partial_fill_of_the_resting_order", "[phase2][engine]") {
+    // Incoming is SMALLER than the resting order. The maker stays, shrunk, and
+    // keeps its queue position.
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId maker = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                             .price = 102, .quantity = 200, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 50, .participant = 2}, trades);
+
+    REQUIRE(trades.size() == 1);
+    CHECK(trades[0].price == Price{102});
+    CHECK(trades[0].quantity == Quantity{50});
+    CHECK(trades[0].maker_id == maker);
+
+    REQUIRE(eng.book().best_ask().has_value());
+    CHECK(*eng.book().best_ask() == Price{102});
+    CHECK(eng.book().is_consistent());
+}
+
+TEST_CASE("engine_partial_fill_of_the_incoming_order", "[phase2][engine]") {
+    // Incoming is LARGER than the only resting order. It trades what it can and
+    // rests the remainder at its own price.
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 102, .quantity = 60, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 100, .participant = 2}, trades);
+
+    REQUIRE(trades.size() == 1);
+    CHECK(trades[0].quantity == Quantity{60});
+
+    CHECK_FALSE(eng.book().best_ask().has_value());       // ask side consumed
+    REQUIRE(eng.book().best_bid().has_value());
+    CHECK(*eng.book().best_bid() == Price{102});          // 40 left, now a bid
+    CHECK(eng.book().is_consistent());
+}
+
+TEST_CASE("engine_consumes_a_level_in_fifo_order", "[phase2][engine]") {
+    // Two makers at one price. The oldest fills first and the trades say so.
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId first  = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                              .price = 102, .quantity = 100, .participant = 1}, trades);
+    const OrderId second = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                              .price = 102, .quantity = 150, .participant = 2}, trades);
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 250, .participant = 3}, trades);
+
+    REQUIRE(trades.size() == 2);
+    CHECK(trades[0].maker_id == first);          // arrived first, filled first
+    CHECK(trades[0].quantity == Quantity{100});
+    CHECK(trades[1].maker_id == second);
+    CHECK(trades[1].quantity == Quantity{150});
+    CHECK(trades[0].seq < trades[1].seq);        // and the log records that order
+
+    CHECK_FALSE(eng.book().best_ask().has_value());
+    CHECK_FALSE(eng.book().best_bid().has_value());
+    CHECK(eng.book().is_consistent());
+}
+
+TEST_CASE("engine_stops_mid_level_leaving_the_second_maker_partly_filled", "[phase2][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId first  = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                              .price = 102, .quantity = 100, .participant = 1}, trades);
+    const OrderId second = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                              .price = 102, .quantity = 150, .participant = 2}, trades);
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 180, .participant = 3}, trades);
+
+    REQUIRE(trades.size() == 2);
+    CHECK(trades[0].maker_id == first);
+    CHECK(trades[0].quantity == Quantity{100});
+    CHECK(trades[1].maker_id == second);
+    CHECK(trades[1].quantity == Quantity{80});   // 180 - 100
+
+    REQUIRE(eng.book().best_ask().has_value());
+    CHECK(*eng.book().best_ask() == Price{102});  // 70 of `second` still resting
+    CHECK(eng.book().is_consistent());
+}
+
+TEST_CASE("engine_pool_returns_every_fully_consumed_maker", "[phase2][engine]") {
+    // Invariant 7 across a fill: a maker consumed to zero goes back to the pool.
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 102, .quantity = 100, .participant = 1}, trades);
+    CHECK(eng.pool().in_use() == std::size_t{1});
+
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 100, .participant = 2}, trades);
+
+    CHECK(eng.pool().in_use() == std::size_t{0});   // maker returned, taker never rested
+    CHECK(eng.pool().free_list_is_consistent());
 }
