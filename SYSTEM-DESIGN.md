@@ -1250,8 +1250,7 @@ the binary is not methodology. The rig now does its own repetition.
   the occupancy bitmap at O(range/64). D20 says this honestly; other write-ups dropped it.
 
 ### D27 - The checkers were trusted, not tested. Mutation testing found it; nothing else did.
-The third pre-ship check, and the only
-one that mutated the engine and re-ran the suite. It landed **after** the v0.1 tag was pushed,
+The third pre-ship check, and the only one that mutated the engine and re-ran the suite. It landed **after** the v0.1 tag was pushed,
 because the tag went out before it finished. That was a mistake and it is recorded
 here rather than tidied away: reading the code found nothing in this area, and
 breaking the code on purpose found all of it.
