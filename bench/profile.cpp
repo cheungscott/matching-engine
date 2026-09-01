@@ -62,8 +62,13 @@ int main(int argc, char** argv) {
     const std::string mode = (argc > 1) ? argv[1] : "rest";
 
     Engine eng(9'000, 11'000, 1 << 21);
+    // A reallocation here would be an allocation inside the measured loop,
+    // which is precisely what this binary exists to detect. Reserve generously
+    // and VERIFY afterwards rather than assuming: a reserve size that holds is still
+    // a guess until it is checked.
     std::vector<Trade> trades;
-    trades.reserve(64);
+    trades.reserve(4096);
+    const std::size_t trade_cap0 = trades.capacity();
 
     std::mt19937 rng(11u);
     std::uniform_int_distribution<int> price_of(kLo, kHi);
@@ -133,6 +138,13 @@ int main(int argc, char** argv) {
                 mode.c_str(), ops_done, count::news, count::dels,
                 static_cast<double>(count::news) / static_cast<double>(ops_done),
                 static_cast<double>(count::dels) / static_cast<double>(ops_done));
+    if (trades.capacity() != trade_cap0) {
+        std::fprintf(stderr,
+                     "INVALID: the trade vector grew %zu -> %zu inside the measured "
+                     "loop, so the counts above include the caller's allocations\n",
+                     trade_cap0, trades.capacity());
+        return 3;
+    }
     (void)sink;
     return 0;
 }

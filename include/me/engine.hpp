@@ -135,7 +135,19 @@ public:
     // which is also the default.
     void set_sink(EventSink* sink) noexcept { sink_ = sink; }
 
-    [[nodiscard]] OrderBook&       book()       noexcept { return book_; }
+    // `apply` appends to the CALLER's vector, so a sweep deeper than its
+    // capacity reallocates — an unbounded allocation on the hot path, which is
+    // the very thing a growable index was rejected for. The bound is the pool's: every trade
+    // touches a distinct resting maker (all but possibly the last are fully consumed),
+    // and at most `capacity` orders rest, so `capacity` trades is the ceiling. Reserve
+    // this and apply() cannot allocate. Same argument that sized IdIndex: the pool is
+    [[nodiscard]] std::size_t max_trades_per_apply() const noexcept {
+        return pool_.capacity() + 1;
+    }
+
+    // const only, deliberately. A mutable handle lets a caller add or remove
+    // behind retire()'s back, which is the one path that keeps the book, the id
+    // index and the pool in step. Nothing outside Engine needs to mutate.
     [[nodiscard]] const OrderBook& book() const noexcept { return book_; }
     [[nodiscard]] const ObjectPool<Order>& pool() const noexcept { return pool_; }
 
