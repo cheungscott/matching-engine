@@ -139,7 +139,19 @@ public:
     // which is what every pre-Phase-6 test does.
     void set_sink(EventSink* sink) noexcept { sink_ = sink; }
 
-    [[nodiscard]] OrderBook&       book()       noexcept { return book_; }
+    // F9. `apply` appends to the CALLER's vector, so a sweep deeper than its
+    // capacity reallocates — an unbounded allocation on the hot path, which is
+    // the very thing D18 was rejected for. The bound is the pool's: every trade
+    // but the last fully consumes a resting maker, and at most `capacity` can
+    // rest. Reserve this and apply() cannot allocate. Same argument that sized
+    // IdIndex (D19): the pool is what makes an unbounded-looking thing bounded.
+    [[nodiscard]] std::size_t max_trades_per_apply() const noexcept {
+        return pool_.capacity() + 1;
+    }
+
+    // const only, deliberately. A mutable handle lets a caller add or remove
+    // behind retire()'s back, which is the one path that keeps the book, the id
+    // index and the pool in step (D14). Nothing outside Engine needs to mutate.
     [[nodiscard]] const OrderBook& book() const noexcept { return book_; }
     [[nodiscard]] const ObjectPool<Order>& pool() const noexcept { return pool_; }
 
