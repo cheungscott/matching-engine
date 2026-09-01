@@ -66,14 +66,29 @@ public:
         //
         // Markets never rest, so they need no slot. The cost for limits is one
         // acquire/release pair on the fully-filled path, and both are pointer bumps.
+        //
+        // An empty pool rejects a limit order only when the order could not trade anyway.
+        // Rejecting unconditionally would refuse a marketable limit order, which consumes
+        // resting liquidity and frees slots: exactly the order a venue wants at capacity,
+        // and one that would trade if the same size were sent as a Market order.
+        //
+        // So a marketable order is let through even without a slot. If it fills
+        // completely it never needed one, and if a remainder survives, its own fills have
+        // freed a slot for it (see below).
         Order* slot = nullptr;
         if (cmd.type == OrderType::Limit) {
             slot = pool_.acquire();
-            if (slot == nullptr) {
+            if (slot == nullptr && !can_match(cmd)) {
                 emit(OrderRejected{.seq = next_seq_++, .reason = RejectReason::PoolExhausted});
                 return kRejected;           // no id burned: it never existed
             }
         }
+
+        // fill() appends to the CALLER's vector, which can throw. The guard returns the
+        // reserved slot on that path too; with a raw local, a bad_alloc there would leak
+        // the slot permanently, check_invariants() would go false and stay false, and
+        // repeating it would drain the pool.
+        SlotGuard guard(pool_, slot);
 
         const SeqNum  arrival = next_seq_++;
         const OrderId id      = next_id_++;
@@ -84,24 +99,42 @@ public:
         fill(cmd, id, remaining, out);
 
         if (remaining == 0) {
-            if (slot != nullptr) {
-                const bool freed = pool_.release(slot);   // reserved, not needed
-                assert(freed && "reserved slot could not be returned");
-                (void)freed;
-            }
-            return id;                      // fully filled; never rests
+            return id;                      // fully filled; guard returns any slot
         }
 
-        // A market order NEVER rests: it wanted liquidity now, not a queue
-        // position. Whatever it could not fill is cancelled.
-        if (cmd.type == OrderType::Market) {
+        // Anything that is not a Limit NEVER rests. Written as != Limit rather than
+        // == Market so that no value outside the enumerators can reach the resting path
+        // below without a reserved slot. validate() already rejects such values; this is
+        // the second lock on the same door.
+        if (cmd.type != OrderType::Limit) {
             emit(OrderCancelled{.seq = next_seq_++, .id = id,
                                 .reason = CancelReason::NoLiquidity});
             return id;
         }
 
+        // The pool was full on entry and this order was let through because it
+        // could trade. A surviving remainder means every crossing maker was fully
+        // consumed, and each of those was retired, and retiring returns a slot. So one
+        // is free now BY CONSTRUCTION, and the remainder can rest after all.
+        //
+        // Cancelling the remainder instead would refuse a queue position that the order's
+        // own fills paid for: the same mistake as rejecting it outright, one step later.
+        if (slot == nullptr) {
+            slot = pool_.acquire();
+            guard.adopt(slot);
+        }
+
+        // Expected unreachable, and not assumed. The rule is that the engine reports
+        // rather than trusts: if the reasoning above is ever wrong, the order is
+        // cancelled with the id it was accepted under, which keeps the log foldable.
+        // The alternative is dereferencing a null pointer to prove a comment right.
+        if (slot == nullptr) {
+            emit(OrderCancelled{.seq = next_seq_++, .id = id,
+                                .reason = CancelReason::PoolExhausted});
+            return id;
+        }
+
         Order* resting = slot;
-        assert(resting != nullptr && "a limit order always reserves a slot");
 
         resting->id          = id;
         resting->side        = cmd.side;
@@ -112,7 +145,10 @@ public:
         resting->entry_seq   = arrival;
         resting->participant = cmd.participant;
 
+        // add() validates and can throw; the guard still owns the slot until it
+        // returns, so an exception here returns the slot instead of leaking it.
         book_.add(resting);
+        guard.dismiss();                    // the book owns it now
         return id;
     }
 
@@ -141,8 +177,13 @@ public:
     // touches a distinct resting maker (all but possibly the last are fully consumed),
     // and at most `capacity` orders rest, so `capacity` trades is the ceiling. Reserve
     // this and apply() cannot allocate. Same argument that sized IdIndex: the pool is
+    // what makes an unbounded-looking thing bounded.
+    //
+    // Two conditions, both real: `out` must be EMPTY on entry (apply APPENDS, so a
+    // reused vector accumulates), and no allocating EventSink may be attached, since
+    // that allocates per event regardless of this bound.
     [[nodiscard]] std::size_t max_trades_per_apply() const noexcept {
-        return pool_.capacity() + 1;
+        return pool_.capacity();
     }
 
     // const only, deliberately. A mutable handle lets a caller add or remove
@@ -169,7 +210,12 @@ private:
     void retire(Order* o) noexcept {
         const bool removed = book_.remove(o);
         assert(removed && "retire(): book refused the order");
-        (void)removed;
+        // The assert is not the protection, because NDEBUG is the build that ships
+        // and the build that is measured. If remove() refused and the release ran anyway,
+        // the pool would free an order still linked into a level and still in the id index,
+        // and apply(Cancel) would return TRUE while leaving a dangling pointer in both.
+        // Leaking a slot is strictly better than handing out a live one twice.
+        if (!removed) return;
         // The pool REPORTS and the caller DECIDES, and this is the call
         // site that decides. Dropping the result here would make the whole return-bool
         // design terminate in a shrug.
@@ -190,7 +236,27 @@ private:
     // nullopt means accepted. Returning the REASON rather than a bool is what
     // lets the reject event say something useful.
     [[nodiscard]] std::optional<RejectReason> validate(const NewOrder& cmd) const noexcept {
+        // Reject values outside the enumerators BEFORE anything branches on
+        // them. OrderType is `enum class : uint8_t`, so static_cast<OrderType>(2) is a
+        // well-defined value that is neither Limit nor Market. Checks that test for one
+        // or the other disagree about it: it would reserve no slot and skip price
+        // validation, leaving one != Limit test between it and the resting path. scenario.hpp
+        // casts an integer straight off a text log, so this is the external input path,
+        // and the format exists to ingest third-party data.
+        if (cmd.side != Side::Buy && cmd.side != Side::Sell) {
+            return RejectReason::MalformedOrder;
+        }
+        if (cmd.type != OrderType::Limit && cmd.type != OrderType::Market) {
+            return RejectReason::MalformedOrder;
+        }
         if (cmd.quantity == 0) return RejectReason::InvalidQuantity;
+        // PriceLevel caches a running SUM of quantity, and an unbounded
+        // quantity wraps it. Worse, is_consistent() recomputes that sum with the same
+        // wrapping arithmetic, so it agrees with the corrupted value: two orders of
+        // 2^63 make depth_at() report ZERO while 2^64 rests, with every invariant
+        // green. A checker that recomputes a value the way it was computed cannot see
+        // an arithmetic fault in that computation.
+        if (cmd.quantity > kMaxQuantity) return RejectReason::InvalidQuantity;
         // A market order carries no meaningful price, so the tick-window check
         // applies only to limits.
         if (cmd.type == OrderType::Limit && !book_.in_range(cmd.price)) {
@@ -255,6 +321,22 @@ private:
     OrderBook         book_;
     ObjectPool<Order> pool_;
     SeqNum            next_seq_ = 1;    // arrival order IS time priority
+    // Returns the reserved slot on ANY exit that did not hand it to the book —
+    // including an exception thrown out of the caller's vector inside fill().
+    class SlotGuard {
+    public:
+        SlotGuard(ObjectPool<Order>& pool, Order* slot) noexcept : pool_(pool), slot_(slot) {}
+        ~SlotGuard() { if (slot_ != nullptr) pool_.release(slot_); }
+        SlotGuard(const SlotGuard&)            = delete;
+        SlotGuard& operator=(const SlotGuard&) = delete;
+        void dismiss() noexcept { slot_ = nullptr; }
+        // Take ownership of a slot acquired after construction (the retry path).
+        void adopt(Order* slot) noexcept { assert(slot_ == nullptr); slot_ = slot; }
+    private:
+        ObjectPool<Order>& pool_;
+        Order*             slot_;
+    };
+
     OrderId           next_id_  = 1;    // 0 reserved for kRejected
     EventSink*        sink_     = nullptr;
 };

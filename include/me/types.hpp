@@ -32,14 +32,27 @@ using ParticipantId = std::uint32_t;  // present from the start so self-trade pr
 // and it warns about ABI stability when it is available.
 inline constexpr std::size_t kCacheLine = 64;
 
+// Quantity is uint64 and PriceLevel caches a running SUM of it, so an
+// unbounded quantity wraps that sum — and is_consistent() recomputes the sum with
+// the SAME wrapping arithmetic, so it agrees with the corrupted value and the
+// invariant check is structurally blind to it. Two orders of 2^63 at one price make
+// depth_at() report ZERO while 2^64 rests.
+//
+// The bound has to make capacity * kMaxQuantity fit in 64 bits. ObjectPool caps
+// capacity at the 32-bit index space, so 2^31 leaves a factor of two in hand.
+// 2.1e9 units of any real instrument is far outside anything a venue accepts.
+inline constexpr Quantity kMaxQuantity = Quantity{1} << 31;
+
 // A resting order. Lives in an ObjectPool slot while resting, and is linked
 // INTRUSIVELY into a PriceLevel via prev/next — the links live inside the
 // object rather than in separate node wrappers, so one order is one object at
 // one address, and holding an Order* IS holding its queue position.
 //
-// LAYOUT. Field order is deliberate: identity first,
-// container-only fields last. `side` and `type` are adjacent so they share one
-// 8-byte slot, and the narrowed `price` drops into the padding they leave.
+// LAYOUT. Field order is deliberate: identity first, container-only fields last.
+// `side` and `type` are adjacent, and the narrowed `price` shares their 8-byte slot
+// rather than claiming one of its own. It sits at offset 12, NOT in the 2 padding
+// bytes at 10-11, because a 4-byte value must start on a 4-byte boundary. The
+// static_asserts below pin the total size and alignment, not these offsets.
 //
 // alignas is doing real work here and is NOT decoration: fitting inside 64
 // bytes is not enough. Objects packed end to end start wherever the previous one
@@ -50,7 +63,7 @@ struct alignas(kCacheLine) Order {
     OrderId       id{};
     Side          side{};
     OrderType     type{};
-    Price         price{};        // meaningless for Market; matcher asserts the convention
+    Price         price{};        // meaningless for Market; normalised to 0 in the log
     Quantity      quantity{};     // original quantity
     Quantity      remaining{};    // decremented by fills; invariant: remaining <= quantity
     SeqNum        entry_seq{};    // arrival order == time priority

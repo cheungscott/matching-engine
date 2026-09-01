@@ -16,9 +16,14 @@ public:
     PriceLevel() = default;
     explicit PriceLevel(Price p) noexcept : price_(p) {}
 
-    // Arrival: newest goes to the back. Precondition: o is in no other list.
+    // Arrival: newest goes to the back.
     void push_back(Order* o) noexcept {
         assert(o != nullptr);
+        // Asserted, not just documented: adding an order that is already
+        // linked silently orphans it in its first list, and the corruption surfaces
+        // far away — cheaper to catch here than to debug there.
+        assert(o->prev == nullptr && o->next == nullptr &&
+               "push_back(): order is already linked into a level");
 
         o->prev = tail_;
         o->next = nullptr;
