@@ -89,11 +89,15 @@ the hot path".
 ## Verification
 
 ```
-Default suite     72 cases, 152,811 assertions          ~3.0 s
-Fuzz gate         1.1M operations, 763,621 assertions   7m30 s
+Default suite     87 cases, 152,949 assertions          ~2.7 s
+Fuzz gate         1.1M operations, 758,717 assertions   6m21 s
 ```
 
 Both run under **AddressSanitizer and UndefinedBehaviorSanitizer**.
+
+**These are counts of checks executed. Until recently a large share of them could not
+fail** — see below, and D27. The number that matters is not how many assertions run,
+it is how many of them constrain the engine.
 
 Four independent mechanisms, because each catches what the others cannot:
 
@@ -128,10 +132,31 @@ Four independent mechanisms, because each catches what the others cannot:
 Plus deterministic replay: ~10,000 commands through two fresh engines produce
 **byte-identical** event logs.
 
-Both property checkers and the shrinker have their own tests — a checker that never
-fails proves nothing, so each check is exercised against a deliberately planted
-violation. Where a check is sampled rather than run every operation, the frequency is
-stated in the test, because a silently sampled check reads as a total one.
+### Every checker is itself tested
+
+*"A checker that never fails proves nothing"* was written into this suite early and
+applied to exactly one of its checkers. A mutation audit then deleted each clause of
+each checker in turn and re-ran everything:
+
+| checker | clauses deleted one at a time | detected |
+|---|---|---|
+| `props::check` / conservation | 24 branches | 5 |
+| `OrderBook::is_consistent` | 9 | **0** |
+| `PriceLevel::is_consistent` | 4 | **0** |
+| `ObjectPool::free_list_is_consistent` | 2 | **0** |
+
+The million-operation gate — the Blueprint's stated accept criterion — passed an
+engine with **time priority destroyed**, because it checked log properties only and no
+log property can see the order of a queue. It also passed an engine whose market
+takers skipped the best level.
+
+Every branch and every clause now has a planted violation, and each plant asserts
+*which* branch fired. That last part is the point: four conservation plants used to
+trip the same branch while their comment claimed one per check. The gate now checks
+invariants periodically, and a new log property constrains a taker's fill prices.
+
+Where a check is sampled rather than run every operation, the frequency is stated in
+the test, because a silently sampled check reads as a total one.
 
 ## Measurements
 
@@ -148,25 +173,35 @@ timer floor ~10 ns. Percentiles are computed per run then medianed.
 **p99.9 first, deliberately** — this is a latency system, and the mean of a
 latency distribution is a number nobody experiences.
 
-| Operation | p99.9 | p99 | max | (p50) |
-|---|---|---|---|---|
-| all | 531 ns | 246 ns | 24 µs | 47 ns |
-| add, rested | 338 ns | 124 ns | 19 µs | 39 ns |
-| add, traded | 460 ns | 198 ns | 14 µs | 63 ns |
-| cancel, hit | 895 ns | 537 ns | 10 µs | 168 ns |
-| cancel, unknown | 511 ns | 372 ns | 21 µs | 87 ns |
+| Operation | p99.9 | p99 | (p50) |
+|---|---|---|---|
+| all | 476 ns | 212 ns | 45 ns |
+| add, rested | 267 ns | 113 ns | 39 ns |
+| add, traded | 352 ns | 175 ns | 60 ns |
+| cancel, hit | 623 ns | 466 ns | 120 ns |
+| cancel, unknown | 461 ns | 280 ns | 40 ns |
 
-Throughput: median **10.2 M ops/sec**.
+Throughput: **24-30 M ops/sec** across three invocations.
 
-**Every figure here was re-measured for this release, and the previous ones did not
-survive.** The table used to claim 87 ns for `cancel, hit` p50; it is 168. Throughput
-was quoted at 12.9 M; it is 10.2 M. Those came from a single invocation, written down
-without a second run.
+The `max` column is gone on purpose. It was a *median of five per-run maxima*, which is
+not a maximum of anything and quietly discards the worst observation. The binary still
+prints it, labelled `medmax`, and it ranges 9-69 µs across invocations — which is the
+hypervisor, and is why it is not quoted here.
 
-Run-to-run spread, measured: two consecutive invocations of the whole benchmark gave
-531 and 574 ns for `all` p99.9 (**8%**), and maxima of 24 µs and 117 µs (**5x**). An
-earlier version of this file claimed "roughly 5%", which was itself a guess. Do not
-quote any of these to three significant figures.
+**Every figure here has been re-measured twice over, and the earlier ones did not
+survive either time.** `cancel, hit` p50 was published as 87 ns, corrected to 168, and
+is 120 on a quiet machine. Throughput was published as 12.9 M, corrected to 10.2 M,
+and is 24-30 M.
+
+That last one is worth explaining, because it moved in the *flattering* direction and
+is still the honest number. The timed loop carries two `rdtscp`+`lfence` pairs per
+operation and `lfence` is a serialising instruction, so **roughly half of the old
+throughput figure was the instrument measuring itself**. Throughput is now measured on
+a separate uninstrumented pass over the same workload; the binary prints both, because
+the gap between them is the finding.
+
+Spread across invocations: `all` p99.9 gave 458 / 476 / 478 ns here, but earlier
+invocations on a busier machine gave 531 and 574. Quote a range, never a figure.
 
 `SYSTEM-DESIGN.md` D18 records a rejected id-index design whose reallocation cost
 **8.1 ms in a single operation** at 2M orders. That number belongs to the *rejected*
@@ -185,6 +220,10 @@ arguments into measurements.
 | 1,000 | 23.9 / 98.5 | 44.4 / 932 | 20x [16-23] |
 | 4,000 | 16.2 / 53.1 | 44.0 / 1,650 | 38x [8-39] |
 | 16,000 | 19.6 / 50.6 | 98.6 / 5,482 | 55x [51-91] |
+
+About a fifth of those cancels miss, and in `NaiveBook` a miss scans both maps in full
+while a hit scans half the population on average — so the miss share inflates the
+ratio. The binary says so in its own output now.
 
 Each cell is the median of **5 runs performed inside the binary**, and the bracket is
 the full min-max of the ratio across them. Look at depth 4,000: a median of 38x over a
@@ -222,8 +261,18 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The fuzz gate is hidden from the default run because it takes several minutes under
-the sanitizers, and a suite you stop running protects nothing:
+`ctest` runs **everything, including the fuzz gate**, which takes several minutes under
+the sanitizers. That is deliberate: the gate used to be invisible to `ctest` because
+Catch2 does not enumerate hidden tests, so the documented command gave a green run with
+the entire Phase 7 gate omitted. The safe thing should happen unless you opt out.
+
+For the fast edit loop, opt out by label:
+
+```bash
+ctest --test-dir build -LE gate
+```
+
+The gate can also be run directly:
 
 ```bash
 ./build/phase1_tests "[gate]"
@@ -237,9 +286,15 @@ cmake --build build-bench --target bench_latency -j
 ./build-bench/bench_latency
 ```
 
-Three configurations, and confusing them is how you get a number you cannot
-reproduce: `Debug` carries the sanitizers, `TSan` is for the ring buffer when it
-arrives, and `Bench` is the only one permitted to produce a latency figure.
+Three configurations, and confusing them is how you get a number you cannot reproduce:
+`Debug` carries the sanitizers, `TSan` is for the ring buffer when it arrives, and
+`Bench` is the only one permitted to produce a latency figure.
+
+`Bench` builds **no tests**. It used to build and register the whole suite, so
+`ctest --test-dir build-bench` came back green with no sanitizers and every `assert`
+compiled out — verifying far less than an identical-looking `Debug` run, with nothing
+saying so. Any other build type is now a hard configure error rather than a build with
+no flags at all.
 
 ## Layout
 
