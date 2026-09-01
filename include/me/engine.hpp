@@ -6,12 +6,14 @@
 // Handles NewOrder (limit and market) and Cancel. Amend is CUT from v0.1.
 #pragma once
 
+#include "me/events.hpp"
 #include "me/object_pool.hpp"
 #include "me/order_book.hpp"
 #include "me/types.hpp"
 
 #include <cassert>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace me {
@@ -46,12 +48,15 @@ public:
     // Match what crosses, rest what remains. Trades are appended to `out`.
     // Returns the engine-assigned id, or kRejected.
     OrderId apply(const NewOrder& cmd, std::vector<Trade>& out) {
-        if (!validate(cmd)) {
+        if (const auto why = validate(cmd); why.has_value()) {
+            emit(OrderRejected{.seq = next_seq_++, .reason = *why});
             return kRejected;
         }
 
         const SeqNum  arrival = next_seq_++;
         const OrderId id      = next_id_++;
+        emit(OrderAccepted{.seq = arrival, .id = id, .side = cmd.side, .type = cmd.type,
+                           .price = cmd.price, .quantity = cmd.quantity});
 
         Quantity remaining = cmd.quantity;
         fill(cmd, id, remaining, out);
@@ -61,14 +66,16 @@ public:
         }
 
         // A market order NEVER rests: it wanted liquidity now, not a queue
-        // position. Whatever it could not fill is cancelled. The design
-        // emits OrderCancelled{NoLiquidity} here, once the event log exists.
+        // position. Whatever it could not fill is cancelled.
         if (cmd.type == OrderType::Market) {
+            emit(OrderCancelled{.seq = next_seq_++, .id = id,
+                                .reason = CancelReason::NoLiquidity});
             return id;
         }
 
         Order* resting = pool_.acquire();
         if (resting == nullptr) {
+            emit(OrderRejected{.seq = next_seq_++, .reason = RejectReason::PoolExhausted});
             return kRejected;               // pool exhausted: an honest bounded failure
         }
 
@@ -91,11 +98,18 @@ public:
     bool apply(const Cancel& cmd) noexcept {
         Order* o = book_.find(cmd.id);
         if (o == nullptr) {
+            emit(OrderRejected{.seq = next_seq_++, .reason = RejectReason::UnknownOrder});
             return false;
         }
         retire(o);
+        emit(OrderCancelled{.seq = next_seq_++, .id = cmd.id,
+                            .reason = CancelReason::UserRequested});
         return true;
     }
+
+    // Attach a destination for the sequenced event stream. Null means discard,
+    // which is also the default.
+    void set_sink(EventSink* sink) noexcept { sink_ = sink; }
 
     [[nodiscard]] OrderBook&       book()       noexcept { return book_; }
     [[nodiscard]] const OrderBook& book() const noexcept { return book_; }
@@ -121,12 +135,20 @@ private:
         pool_.release(o);
     }
 
-    [[nodiscard]] bool validate(const NewOrder& cmd) const noexcept {
-        if (cmd.quantity == 0) return false;
+    // nullopt means accepted. Returning the REASON rather than a bool is what
+    // lets the reject event say something useful.
+    [[nodiscard]] std::optional<RejectReason> validate(const NewOrder& cmd) const noexcept {
+        if (cmd.quantity == 0) return RejectReason::InvalidQuantity;
         // A market order carries no meaningful price, so the tick-window check
         // applies only to limits.
-        if (cmd.type == OrderType::Limit && !book_.in_range(cmd.price)) return false;
-        return true;
+        if (cmd.type == OrderType::Limit && !book_.in_range(cmd.price)) {
+            return RejectReason::PriceOutOfRange;
+        }
+        return std::nullopt;
+    }
+
+    void emit(const Event& e) noexcept {
+        if (sink_ != nullptr) sink_->publish(e);
     }
 
     // Can this order trade against what is resting right now?
@@ -157,13 +179,16 @@ private:
 
             // At the MAKER's price. The resting order set the terms; the
             // aggressor accepted them, so the taker may take price improvement.
+            const SeqNum tseq = next_seq_++;
             out.push_back(Trade{
-                .seq      = next_seq_++,
+                .seq      = tseq,
                 .maker_id = maker->id,
                 .taker_id = taker_id,
                 .price    = maker->price,
                 .quantity = traded,
             });
+            emit(TradeExecuted{.seq = tseq, .maker_id = maker->id, .taker_id = taker_id,
+                               .price = maker->price, .quantity = traded});
             remaining -= traded;
 
             if (traded == maker->remaining) {
@@ -179,6 +204,7 @@ private:
     ObjectPool<Order> pool_;
     SeqNum            next_seq_ = 1;    // arrival order IS time priority
     OrderId           next_id_  = 1;    // 0 reserved for kRejected
+    EventSink*        sink_     = nullptr;
 };
 
 } // namespace me
