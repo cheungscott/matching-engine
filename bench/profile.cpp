@@ -137,17 +137,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    // D26 — check BEFORE printing. This used to report the results line and flag the
+    // problem afterwards, while the README claimed it would "abort rather than report".
+    // A rig that prints a number and then says the number is wrong has already lost:
+    // the number is what gets copied.
+    if (trades.capacity() != trade_cap0) {
+        std::fprintf(stderr,
+                     "INVALID: the trade vector grew %zu -> %zu inside the measured "
+                     "loop, so these counts include the caller's allocations\n",
+                     trade_cap0, trades.capacity());
+        return 3;
+    }
+
     std::printf("mode=%-12s ops=%-9zu new=%-9zu delete=%-9zu  per-op: new=%.2f delete=%.2f\n",
                 mode.c_str(), ops_done, count::news, count::dels,
                 static_cast<double>(count::news) / static_cast<double>(ops_done),
                 static_cast<double>(count::dels) / static_cast<double>(ops_done));
-    if (trades.capacity() != trade_cap0) {
-        std::fprintf(stderr,
-                     "INVALID: the trade vector grew %zu -> %zu inside the measured "
-                     "loop, so the counts above include the caller's allocations\n",
-                     trade_cap0, trades.capacity());
-        return 3;
-    }
     (void)sink;
     return 0;
 }
