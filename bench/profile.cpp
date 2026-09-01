@@ -10,6 +10,7 @@
 #include "me/engine.hpp"
 #include "me/types.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <new>
@@ -49,8 +50,14 @@ namespace {
 
 constexpr Price       kLo   = 9'900;
 constexpr Price       kHi   = 10'100;
-constexpr std::size_t kFill = 200'000;   // resting depth before the measured loop
-constexpr std::size_t kOps  = 2'000'000;
+// Defaults: every measured mode runs the same number of operations against the same
+// book. The pool (2^22, set in main) holds the fill plus every "rest" operation with
+// margin; if it ran out, the tail of "rest" would be PoolExhausted rejects, a two-branch
+// early return rather than the add + push_back + index insert the mode isolates, and
+// main() refuses to report. "cancel" runs one operation per live order, up to kOps, so
+// the fill and the op count default to the same value.
+constexpr std::size_t kFill = 1'000'000;   // resting depth before the measured loop
+constexpr std::size_t kOps  = 1'000'000;
 
 } // namespace
 
@@ -61,7 +68,7 @@ int main(int argc, char** argv) {
 #endif
     const std::string mode = (argc > 1) ? argv[1] : "rest";
 
-    Engine eng(9'000, 11'000, 1 << 21);
+    Engine eng(9'000, 11'000, 1 << 22);
     // A reallocation here would be an allocation inside the measured loop,
     // which is precisely what this binary exists to detect. Reserve generously
     // and VERIFY afterwards rather than assuming: a reserve size that holds is still
@@ -92,19 +99,35 @@ int main(int argc, char** argv) {
         if (id != Engine::kRejected) live.push_back(id);
     }
 
+    // Precomputed BEFORE the counters are reset, for the same reason the book is built
+    // first: the measurement must contain the operation and nothing else. Doing this
+    // inside the loop would put an mt19937 draw (a 624-word state) next to the very
+    // cache-miss counter this binary exists to have sampled; doing it after the reset
+    // would count the vector's own allocation as the engine's.
+    std::vector<Price> prices;
+    prices.reserve(kOps);
+    for (std::size_t n = 0; n < kOps; ++n) {
+        prices.push_back(static_cast<Price>(price_of(rng) - 300));
+    }
+
     // Reset AFTER building the book: the measurement is the operation, not the fill.
     count::news = 0;
     count::dels = 0;
     std::size_t ops_done = 0;
 
-    std::size_t sink = 0;
+    std::size_t sink     = 0;
+    std::size_t rejected = 0;
 
     if (mode == "cancel") {
         // Cancel orders that exist. Each is a hash lookup, an unlink, an index
         // erase, a pool release, and possibly a cursor advance.
-        std::size_t i = 0;
-        for (std::size_t n = 0; n < kOps && i < live.size(); ++n, ++i) {
-            sink += eng.apply(Cancel{live[i]}) ? 1u : 0u;
+        // `live` is in insertion order, i.e. strictly ascending ids, and IdIndex keeps
+        // consecutive ids adjacent within a 64-slot block. Walking it in order would probe
+        // block by block, a cache-friendly pattern no real cancel flow resembles, so it is
+        // shuffled first. bench/baseline.cpp also draws its cancel ids at random.
+        std::shuffle(live.begin(), live.end(), rng);
+        for (std::size_t n = 0; n < kOps && n < live.size(); ++n) {
+            sink += eng.apply(Cancel{live[n]}) ? 1u : 0u;
             ++ops_done;
         }
     } else if (mode == "cancel_miss") {
@@ -125,13 +148,30 @@ int main(int argc, char** argv) {
         }
     } else {
         // rest: never crosses, so it is add + push_back + index insert.
+        //
+        // Prices are precomputed above: an mt19937 draw inside the loop would touch a
+        // 624-word state and pollute cache-misses, one of the exact counters this binary
+        // exists to have sampled by perf.
         for (std::size_t n = 0; n < kOps; ++n) {
             trades.clear();
-            sink += eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                       .price = static_cast<Price>(price_of(rng) - 300),
-                                       .quantity = 1, .participant = 1}, trades);
+            const OrderId id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                                  .price = prices[n],
+                                                  .quantity = 1, .participant = 1}, trades);
+            if (id == Engine::kRejected) ++rejected;
+            sink += id;
             ++ops_done;
         }
+    }
+
+    // Refuse if the pool ran out mid-measurement. The mode would still
+    // print a plausible number while a growing share of its samples were a two-branch
+    // early return rather than the operation named on the line.
+    if (rejected != 0) {
+        std::fprintf(stderr,
+                     "INVALID: %zu of %zu operations were rejected (pool exhausted), so "
+                     "these samples are not all the operation this mode claims\n",
+                     rejected, ops_done);
+        return 3;
     }
 
     // Check BEFORE printing, and abort rather than report. A rig that prints a number

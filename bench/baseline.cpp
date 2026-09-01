@@ -35,9 +35,12 @@ namespace {
 // Same rdtscp pair bench_latency uses, rather than steady_clock.
 inline std::uint64_t tsc_now() noexcept {
 #if defined(__x86_64__)
+    // rdtscp waits for earlier instructions to retire; the lfence goes AFTER it, so
+    // later instructions cannot be hoisted above the read.
     unsigned aux;
+    const std::uint64_t t = __rdtscp(&aux);
     _mm_lfence();
-    return __rdtscp(&aux);
+    return t;
 #else
     return 0;
 #endif
@@ -214,6 +217,12 @@ int main() {
     std::printf("    cancel scans O(n) where the id index is O(1), so cxl should climb\n");
     std::printf("    while add stays roughly flat.\n");
     std::printf("  · Not a pinned-core measurement. Same caveat as bench_latency.\n");
+    std::printf("  · About a FIFTH of the cancels miss (ids are drawn with\n");
+    std::printf("    replacement, so many target an already-cancelled order). In\n");
+    std::printf("    NaiveBook a hit scans half the population on average and a MISS\n");
+    std::printf("    scans both maps in full, so the miss share inflates the ratio\n");
+    std::printf("    above. That is a property of this stream: a workload of only\n");
+    std::printf("    hits would show a smaller ratio at every depth.\n");
     std::printf("  · NaiveBook is deliberately dumb. This is not a claim about\n");
     std::printf("    std::map, it is a claim about THIS design against the obvious one.\n");
     std::printf("  · Engine cancel is NOT flat with depth: it grows sub-linearly,\n");
