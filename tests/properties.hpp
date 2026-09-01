@@ -111,7 +111,13 @@ inline Violation check(const std::vector<Event>& log, Price min_price, Price max
         taker_last[t->taker_id] = t->price;
 
         // --- cancelled never matches ---------------------------------------
-        if (gone.count(t->maker_id) != 0) return fail("a cancelled order traded again", i);
+        if (gone.count(t->maker_id) != 0)
+            return fail("a cancelled order traded again as maker", i);
+        // D27/R20 — the taker side was unchecked. Structurally unreachable through the
+        // engine today, which is exactly why it should be checked: the property is
+        // about the LOG, and a log is allowed to come from somewhere else.
+        if (gone.count(t->taker_id) != 0)
+            return fail("a cancelled order traded again as taker", i);
 
         // --- conservation ---------------------------------------------------
         filled[t->maker_id] += t->quantity;
