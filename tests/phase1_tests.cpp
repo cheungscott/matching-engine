@@ -1191,23 +1191,126 @@ TEST_CASE("the_log_changes_when_behaviour_changes", "[phase6][replay]") {
 
 namespace {
 
-// Run a stream and return its event log, for property checking.
-std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
-                                  std::size_t pool_capacity = 8192) {
-    Engine     eng(kMin, kMax, pool_capacity);
-    VectorSink sink;
-    eng.set_sink(&sink);
-
+// Drive a command stream into an engine the caller owns. Conservation needs the
+// BOOK alive alongside the log, which run_for_events cannot give it.
+void feed(Engine& eng, const std::vector<scenario::Command>& cmds) {
     std::vector<Trade> scratch;
     for (const auto& c : cmds) {
         scratch.clear();
         if (const auto* n = std::get_if<NewOrder>(&c)) eng.apply(*n, scratch);
         else                                           eng.apply(*std::get_if<Cancel>(&c));
     }
+}
+
+// Run a stream and return its event log, for property checking.
+std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
+                                  std::size_t pool_capacity = 8192) {
+    Engine     eng(kMin, kMax, pool_capacity);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    feed(eng, cmds);
     return sink.events();
 }
 
 } // namespace
+
+TEST_CASE("conservation_holds_after_every_operation", "[phase7][fuzz]") {
+    // Blueprint §9.2 asks for conservation after EVERY operation. It is O(log +
+    // resting) per call, so the every-op version runs on a small stream and the
+    // gate runs it at checkpoints and at the end. Both, rather than neither.
+    Engine     eng(kMin, kMax, 1024);
+    VectorSink sink;
+    eng.set_sink(&sink);
+
+    const auto         cmds = make_stream(31337u, 900);
+    std::vector<Trade> scratch;
+
+    for (std::size_t i = 0; i < cmds.size(); ++i) {
+        INFO("after operation " << i);
+        scratch.clear();
+        if (const auto* n = std::get_if<NewOrder>(&cmds[i])) eng.apply(*n, scratch);
+        else                                                 eng.apply(*std::get_if<Cancel>(&cmds[i]));
+
+        const auto c = props::check_conservation(sink.events(), eng.book());
+        INFO(c.why);
+        REQUIRE(c.ok);
+    }
+}
+
+TEST_CASE("conservation_survives_pool_exhaustion", "[phase7][fuzz]") {
+    // The path F4 was hiding on. A tiny pool guarantees rejections, and an
+    // OrderRejected moves no quantity — so if the engine ever burns an id or
+    // half-accepts an order, accepted stops matching filled+withdrawn+resting.
+    Engine     eng(kMin, kMax, 16);
+    VectorSink sink;
+    eng.set_sink(&sink);
+
+    feed(eng, make_stream(8080u, 600));
+
+    bool saw_rejection = false;
+    for (const Event& e : sink.events()) {
+        if (const auto* r = std::get_if<OrderRejected>(&e)) {
+            if (r->reason == RejectReason::PoolExhausted) { saw_rejection = true; break; }
+        }
+    }
+    REQUIRE(saw_rejection);            // otherwise this test proves nothing
+
+    const auto c = props::check_conservation(sink.events(), eng.book());
+    INFO(c.why);
+    REQUIRE(c.ok);
+}
+
+TEST_CASE("the_conservation_checker_catches_a_planted_violation", "[phase7][fuzz]") {
+    // Same discipline as the property checker above: a checker that never fails
+    // is an expensive way of computing `true`. One plant per check it makes.
+    Engine     eng(kMin, kMax, 8192);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    feed(eng, make_stream(24601u, 700));
+
+    const std::vector<Event> clean = sink.events();
+    REQUIRE(props::check_conservation(clean, eng.book()).ok);
+
+    auto index_of = [&clean](auto pred) -> std::size_t {
+        for (std::size_t i = 0; i < clean.size(); ++i) if (pred(clean[i])) return i;
+        return clean.size();
+    };
+    const std::size_t acc = index_of([](const Event& e) {
+        const auto* a = std::get_if<OrderAccepted>(&e);
+        return a != nullptr && a->type == OrderType::Limit;
+    });
+    const std::size_t trd = index_of([](const Event& e) {
+        return std::holds_alternative<TradeExecuted>(e);
+    });
+    REQUIRE(acc < clean.size());
+    REQUIRE(trd < clean.size());
+
+    SECTION("a fill the book performed but the log omits") {
+        auto bad = clean;
+        bad.erase(bad.begin() + static_cast<std::ptrdiff_t>(trd));
+        CHECK_FALSE(props::check_conservation(bad, eng.book()).ok);
+    }
+    SECTION("an order accepted for more than it really was") {
+        auto bad = clean;
+        std::get<OrderAccepted>(bad[acc]).quantity += 7;
+        CHECK_FALSE(props::check_conservation(bad, eng.book()).ok);
+    }
+    SECTION("a cancel the book performed but the log omits") {
+        auto bad = clean;
+        const std::size_t cxl = index_of([](const Event& e) {
+            return std::holds_alternative<OrderCancelled>(e);
+        });
+        REQUIRE(cxl < clean.size());        // not `if` — a skipped plant passes silently
+        bad.erase(bad.begin() + static_cast<std::ptrdiff_t>(cxl));
+        CHECK_FALSE(props::check_conservation(bad, eng.book()).ok);
+    }
+    SECTION("an order the log accepts and the book never held") {
+        auto bad = clean;
+        bad.push_back(OrderAccepted{.seq = 999'999, .id = 888'888, .side = Side::Buy,
+                                    .type = OrderType::Limit, .price = 100, .quantity = 5});
+        CHECK_FALSE(props::check_conservation(bad, eng.book()).ok);
+    }
+}
 
 TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") {
     // The Blueprint's accept criterion. Properties are checked against the log
@@ -1216,13 +1319,25 @@ TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") 
     constexpr int kOps = 1'000'000;
 
     const auto cmds = make_stream(20260907u, kOps);
-    const auto log  = run_for_events(cmds, 65536);
+
+    // The engine is constructed HERE rather than inside run_for_events because
+    // conservation compares the log against the surviving book.
+    Engine     eng(kMin, kMax, 65536);
+    VectorSink sink;
+    eng.set_sink(&sink);
+    feed(eng, cmds);
+    const std::vector<Event>& log = sink.events();
 
     REQUIRE(log.size() > static_cast<std::size_t>(kOps));   // it did real work
 
     const auto v = props::check(log, kMin, kMax);
     INFO(v.why << " at event " << v.at_event);
     REQUIRE(v.ok);
+
+    // Blueprint §4.5, at full scale, against the book this log produced.
+    const auto c = props::check_conservation(log, eng.book());
+    INFO(c.why);
+    REQUIRE(c.ok);
 }
 
 TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][phase7][fuzz]") {
@@ -1233,6 +1348,13 @@ TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][ph
     Engine           real(kMin, kMax, 65536);
     naive::NaiveBook ref(kMin, kMax);
     const auto       cmds = make_stream(20260908u, kOps);
+
+    // Conservation folds the whole log, so checking it after EVERY operation
+    // would make this O(ops^2). Every 5,000 instead — stated rather than
+    // silently sampled. The per-operation version runs on a small stream below.
+    VectorSink sink;
+    real.set_sink(&sink);
+    constexpr std::size_t kConservationEvery = 5'000;
 
     std::vector<Trade> got;
     std::vector<Trade> want;
@@ -1259,6 +1381,18 @@ TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][ph
         REQUIRE(real.book().best_bid() == ref.best_bid());
         REQUIRE(real.book().best_ask() == ref.best_ask());
         REQUIRE(real.check_invariants());
+
+        if ((i + 1) % kConservationEvery == 0) {
+            const auto c = props::check_conservation(sink.events(), real.book());
+            INFO(c.why);
+            REQUIRE(c.ok);
+        }
+    }
+
+    {
+        const auto c = props::check_conservation(sink.events(), real.book());
+        INFO(c.why);
+        REQUIRE(c.ok);
     }
 
     for (Price p = kMin; p <= kMax; ++p) {
