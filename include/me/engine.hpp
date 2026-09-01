@@ -42,8 +42,11 @@ public:
     // this with std::expected<OrderId, RejectReason>, which g++ 11 lacks.
     static constexpr OrderId kRejected = 0;
 
+    // The index is sized from the pool, exactly: an order that cannot be pooled
+    // cannot rest, so `pool_capacity` is a hard bound on live index entries and
+    // the index never needs to grow.
     Engine(Price min_price, Price max_price, std::size_t pool_capacity)
-        : book_(min_price, max_price), pool_(pool_capacity) {}
+        : book_(min_price, max_price, pool_capacity), pool_(pool_capacity) {}
 
     // Match what crosses, rest what remains. Trades are appended to `out`.
     // Returns the engine-assigned id, or kRejected.
@@ -53,15 +56,39 @@ public:
             return kRejected;
         }
 
+        // A limit order reserves its slot BEFORE it is accepted.
+        //
+        // Emitting the accept first and consulting the pool after matching would turn
+        // exhaustion into Accepted-then-Rejected, and the reject carries no id, leaving a
+        // replayer unable to undo the accept. A log that cannot be folded back into the
+        // book breaks the one claim the event-sourced design makes. Reserving first means
+        // an order is only ever accepted if the engine can honour it.
+        //
+        // Markets never rest, so they need no slot. The cost for limits is one
+        // acquire/release pair on the fully-filled path, and both are pointer bumps.
+        Order* slot = nullptr;
+        if (cmd.type == OrderType::Limit) {
+            slot = pool_.acquire();
+            if (slot == nullptr) {
+                emit(OrderRejected{.seq = next_seq_++, .reason = RejectReason::PoolExhausted});
+                return kRejected;           // no id burned: it never existed
+            }
+        }
+
         const SeqNum  arrival = next_seq_++;
         const OrderId id      = next_id_++;
         emit(OrderAccepted{.seq = arrival, .id = id, .side = cmd.side, .type = cmd.type,
-                           .price = cmd.price, .quantity = cmd.quantity});
+                           .price = canonical_price(cmd), .quantity = cmd.quantity});
 
         Quantity remaining = cmd.quantity;
         fill(cmd, id, remaining, out);
 
         if (remaining == 0) {
+            if (slot != nullptr) {
+                const bool freed = pool_.release(slot);   // reserved, not needed
+                assert(freed && "reserved slot could not be returned");
+                (void)freed;
+            }
             return id;                      // fully filled; never rests
         }
 
@@ -73,11 +100,8 @@ public:
             return id;
         }
 
-        Order* resting = pool_.acquire();
-        if (resting == nullptr) {
-            emit(OrderRejected{.seq = next_seq_++, .reason = RejectReason::PoolExhausted});
-            return kRejected;               // pool exhausted: an honest bounded failure
-        }
+        Order* resting = slot;
+        assert(resting != nullptr && "a limit order always reserves a slot");
 
         resting->id          = id;
         resting->side        = cmd.side;
@@ -101,7 +125,7 @@ public:
             emit(OrderRejected{.seq = next_seq_++, .reason = RejectReason::UnknownOrder});
             return false;
         }
-        retire(o);
+        retire(o);                      // the one removal path
         emit(OrderCancelled{.seq = next_seq_++, .id = cmd.id,
                             .reason = CancelReason::UserRequested});
         return true;
@@ -131,8 +155,24 @@ private:
     // removal in the engine goes through here — fill-to-zero, cancel, and
     // amend when it arrives — so invariant 7 has exactly one place to break.
     void retire(Order* o) noexcept {
-        book_.remove(o);
-        pool_.release(o);
+        const bool removed = book_.remove(o);
+        assert(removed && "retire(): book refused the order");
+        (void)removed;
+        // The pool REPORTS and the caller DECIDES, and this is the call
+        // site that decides. Dropping the result here would make the whole return-bool
+        // design terminate in a shrug.
+        const bool freed = pool_.release(o);
+        assert(freed && "retire(): pool refused the slot — double release or foreign pointer");
+        (void)freed;
+    }
+
+    // A market order's price field is meaningless, so it is normalised to 0
+    // before it reaches the event log. Without this, two behaviourally
+    // identical market orders carrying different junk produce different
+    // byte-for-byte logs — a canonicality hole in the exact artefact the replay
+    // test diffs.
+    [[nodiscard]] static Price canonical_price(const NewOrder& cmd) noexcept {
+        return (cmd.type == OrderType::Market) ? Price{0} : cmd.price;
     }
 
     // nullopt means accepted. Returning the REASON rather than a bool is what
