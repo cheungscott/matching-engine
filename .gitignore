@@ -1,5 +1,7 @@
 # Build output
 /build/
+/build-bench/
+/build-tsan/
 *.exe
 *.o
 *.obj
