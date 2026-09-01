@@ -5,7 +5,7 @@
 // are event-sourced systems: their product IS the event stream.
 //
 // Rationale in SYSTEM-DESIGN.md D15.
-// . See WORKING-RULES.md for the mode rule.
+// See WORKING-RULES.md for the mode rule.
 #pragma once
 
 #include "me/types.hpp"

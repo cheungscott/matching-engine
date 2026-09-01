@@ -3,7 +3,7 @@
 // Storage only. The book NEVER decides to match: add() has a precondition that
 // the order does not cross, and the Engine is what guarantees it.
 //
-// Rationale in SYSTEM-DESIGN.md D10. .
+// Rationale in SYSTEM-DESIGN.md D10.
 #pragma once
 
 #include "me/id_index.hpp"

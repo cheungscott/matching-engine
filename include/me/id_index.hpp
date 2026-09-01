@@ -14,7 +14,7 @@
 // The key observation: **at most `capacity` orders can rest at once**, because
 // the pool says so. Live entries are bounded even though ids are not, so the
 // table can be sized once from the pool and never grow.
-// . See WORKING-RULES.md for the mode rule.
+// See WORKING-RULES.md for the mode rule.
 #pragma once
 
 #include "me/types.hpp"

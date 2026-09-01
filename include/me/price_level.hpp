@@ -4,7 +4,7 @@
 // one object at one address, and holding an Order* IS holding its queue
 // position. That is what makes O(1) cancel possible from Phase 4.
 //
-// Rationale in SYSTEM-DESIGN.md D9. .
+// Rationale in SYSTEM-DESIGN.md D9.
 #pragma once
 
 #include "me/types.hpp"

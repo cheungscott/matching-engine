@@ -5,7 +5,7 @@
 //
 // Handles NewOrder (limit and market) and Cancel. Amend is CUT from v0.1.
 //
-// Rationale in SYSTEM-DESIGN.md D11-D14. .
+// Rationale in SYSTEM-DESIGN.md D11-D14.
 #pragma once
 
 #include "me/events.hpp"

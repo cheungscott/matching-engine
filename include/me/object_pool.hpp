@@ -4,7 +4,6 @@
 // worst case is unbounded, and unbounded is what disqualifies it.
 //
 // Rationale for every choice here lives in SYSTEM-DESIGN.md D5 and D8.
-// Implementation , 2026-08-30.
 #pragma once
 
 #include "me/asan.hpp"

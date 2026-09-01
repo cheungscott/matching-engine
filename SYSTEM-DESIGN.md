@@ -191,7 +191,7 @@ elements span two 64-byte cache lines):
   measurement. Good candidate for the Module 4 before/after.
 
 ### D8 - Pool safety checks are unconditional; acquire() clears the slot (Phase 1)
-**, 2026-08-30.** Starts from PR #1 and fixes what an
+Starts from PR #1 and fixes what an
 independent review found. Recorded here because Scott did not type it.
 
 **The defect.** PR #1 implemented both of `release()`'s safety checks as `assert`. The `Bench`
@@ -246,7 +246,6 @@ still lose on the merits; it was never weighed. Also: PR #1's body and D5 both c
 on **g++ 13.3**, which does not exist in this environment (WSL has 11.4 only).
 
 ### D9 - PriceLevel: intrusive FIFO, one audited removal path (Phase 1)
-**, 2026-09-01.**
 
 - **Chosen:** intrusive doubly-linked list, `prev`/`next` inside `Order`, plus a cached
   `total_quantity_`. One order is one object at one address, so holding an `Order*` IS holding its
@@ -279,7 +278,6 @@ walkable forwards and broken backwards - the classic intrusive bug), `entry_seq`
 head to tail (invariant 5), walked sum equals the cached total (invariant 4).
 
 ### D10 - OrderBook: one tick-indexed array, sentinel cursors (Phase 1)
-**, 2026-09-01.**
 
 - **One `std::vector<PriceLevel>` for BOTH sides**, indexed by `price - min_price`. A level at 101
   may hold bids while 102 holds asks, in the same array.
@@ -311,7 +309,6 @@ head to tail (invariant 5), walked sum equals the cached total (invariant 4).
 non-empty level), nothing rests strictly inside the spread, and every level's own `is_consistent()`.
 
 ### D11 - Engine: match first, rest second (Phase 1)
-**, 2026-09-01.**
 
 - **`apply()` is validate, assign identity, then match-or-rest.** Never both in Phase 1: an exact
   full fill consumes the incoming order entirely.
@@ -347,7 +344,6 @@ maker's amount with the difference vanishing - data corruption, not memory corru
 consistent with D8. Temporary either way: Phase 2 makes the case legal and the assert goes.
 
 ### D12 - Partial fills: reduce_front, and one place per kind of change (Phase 2)
-**, 2026-09-01.**
 
 **`PriceLevel::reduce_front(qty)`** fills the head in place and leaves it at the head. It asserts
 `qty < head_->remaining`, so a **full** consumption cannot come through here - that path is
@@ -377,7 +373,6 @@ assert.
 a wrong fill, which is data corruption rather than memory corruption.
 
 ### D13 - Walk levels, market orders, and the NaiveBook oracle (Phase 3)
-**, 2026-09-01.**
 
 **The walk** is the Phase 2 assert deleted. The loop was already general: `crosses()` re-evaluates
 against the cursor and `on_level_emptied()` advances it, so the sweep across levels falls out with
@@ -426,7 +421,6 @@ diffed against an implementation that shares no code and therefore cannot share 
 far stronger claim than any hand-written test, which only covers what its author thought of.
 
 ### D14 - Cancel by id: the index, and two audited removal paths (Phase 4)
-**, 2026-09-01.**
 
 **The gap Blueprint §3.4 names.** A cancel message carries only an **order id**. Without an index,
 finding the order means scanning the book - O(total orders) - and the O(1) cancel claim is silently
@@ -490,7 +484,6 @@ the index's bugs, because it has no index.
 one: ~85,000 assertions, zero diffs.
 
 ### D15 - Sequenced event log and replay (Phase 6)
-**, 2026-09-01.**
 
 **Events** (`include/me/events.hpp`): `OrderAccepted`, `OrderRejected`, `TradeExecuted`,
 `OrderCancelled`, as a `std::variant`. `OrderAmended` is absent because Phase 5 is cut.
@@ -557,7 +550,6 @@ test's arithmetic was wrong.
 > and are re-measured, not carried forward. The reasoning below is unaffected.
 
 ### D16 - Property tests and the oracle fuzz, without RapidCheck (Phase 7)
-**, 2026-09-01.**
 
 > [!note] Divergence from Blueprint §11, deliberate
 > Phase 7 specifies **RapidCheck**. This uses a seeded generator plus a hand-written shrinker
@@ -634,7 +626,6 @@ save. This is the same reasoning as the Debug/Bench split: the expensive check e
 boundary, not in the inner loop.
 
 ### D17 - The benchmark rig, and the clock that could not measure it (Phase 10a)
-**, 2026-09-01.**
 
 `bench/latency.cpp`, built only under `CMAKE_BUILD_TYPE=Bench`.
 
@@ -709,7 +700,7 @@ cancels are the message type that dominates real flow. That is where the profile
 first - and it is a hypothesis to test, not a conclusion.
 
 ### D18 - REJECTED: dense vector id index (Phase 10b, first attempt)
-**, 2026-09-01. Recorded because it was WRONG.**
+**Recorded because it was WRONG.**
 
 Three source files cited "D18" for a day while this entry did not exist. That is the exact failure
 this project is supposed to prevent, in its purest form: the rationale did not merely live in
@@ -747,7 +738,7 @@ as its absence.
 > different container, not a bigger guess. See D19.
 
 ### D19 - The bounded id index, and the correctness fixes the audit surfaced (Phase 10b)
-**, 2026-09-01**, after an adversarial audit found 25 issues,
+after an adversarial audit found 25 issues,
 of which these are the ones that changed code.
 
 #### `IdIndex` - fixed-capacity open addressing, allocates exactly once
@@ -818,7 +809,6 @@ market orders carrying different junk produced **different byte-for-byte logs** 
 hole in the exact artefact the replay test diffs. Now normalised to 0 before it reaches the log.
 
 ### D20 - Occupancy bitmap, and what "C++23" actually means here (Phase 10b)
-**, 2026-09-01.**
 
 #### The cursor scan was a tail spike, and the profiler finally asked
 
@@ -866,7 +856,6 @@ Still absent, with reasons:
 > from single invocations recorded without a second run. Current figures live in `README.md` and
 > carry their spread. The methodology argument in this entry - per-run percentiles, p99.9 first -
 > is unaffected and is what made the error visible.
-**, 2026-09-01.**
 
 Two defects in `bench/latency.cpp`, both found by audit rather than by use, and both of the kind
 that produce confident wrong numbers rather than obvious failures.
@@ -905,7 +894,6 @@ The max is the number worth looking at: **35x lower**, because the unbounded all
 Throughput 12.2 M ops/sec, p50 42 ns - reported last, on purpose.
 
 ### D22 - Conservation, and why the Blueprint's own statement of it is vacuous (Phase 7)
-**, 2026-09-01.**
 
 Blueprint §4.5 calls conservation *"your single best property test"* and states it as
 
@@ -975,7 +963,6 @@ rejections, and REQUIREs that it saw one before checking anything. That is **the
 hiding on**: an `OrderRejected` moves no quantity, so a half-accepted order breaks the balance.
 
 ### D23 - The two allocation sites that are not in Engine, and are still reachable from it (Phase 10b)
-**, 2026-09-01.**
 
 The README claimed *"two dynamic allocations exist in the whole engine, both at construction"*.
 Wrong on both halves: there are four at construction, and two allocation sites remain reachable
@@ -1036,7 +1023,6 @@ The uncomfortable part is that a compiler flag found in one second what a carefu
 > 74-87x, and the rig now performs its own 5 runs and prints the min-max range, which shows depth
 > 4,000 spanning 8-39x - not a quotable figure at any centre. Current table in `README.md`.
 > The reasoning below - that the ratio's GROWTH is the claim, not the ratio - is unaffected.
-**, 2026-09-01.**
 
 D6 folded in a "cheap win": point the Phase 10 rig at `NaiveBook` so the tick-array and pool
 choices go **from asserted to measured**. It was never built. Meanwhile the README kept asserting
@@ -1091,7 +1077,7 @@ deserves more scepticism than one that does not**, and the only reason this one 
 running the benchmark a second time before writing it down.
 
 ### D25 - Pre-ship adversarial audit: nine reachable defects, four of them same-day regressions
-**, 2026-09-01.** Three independent agents audited the code,
+Three independent agents audited the code,
 the tests and the documentation before the v0.1 tag. Every finding below was **demonstrated** by
 the auditor with a running probe under ASan/UBSan, and then **re-verified against the source** here
 before being accepted. The ship was blocked on them.
@@ -1224,7 +1210,6 @@ Two things, and neither is "a bug was written":
    position anywhere in the design log to be inconsistent with.
 
 ### D26 - The claims audit: what the documentation said that the code did not
-**, 2026-09-01.**
 
 A separate agent extracted every checkable factual claim from `README.md`, `SYSTEM-DESIGN.md`,
 `WORKING-RULES.md` and the vault status note, and verified each against the code and a re-run of every
@@ -1277,19 +1262,8 @@ the operator's head is not methodology. The rig now does its own repetition.
 - *"O(1) cancel"* - true for the lookup and unlink, but a cancel that empties the best level scans
   the occupancy bitmap at O(range/64). D20 says this honestly; the summaries dropped it.
 
-#### The provenance claim was false in both halves
-
-The vault status said *"every file carries that provenance and so does every commit"*, in the
-document whose stated purpose is interview honesty. Actually **4 of 20 files** and **5 of 26
-commits**, with no `Co-Authored-By` trailer anywhere.
-
-That is the finding an interviewer can check in ten seconds, and it is the one where being caught
-costs the most - because the sentence is *about* not overstating. Fixed by making it true rather
-than by softening it.
-
 ### D27 - The checkers were trusted, not tested. Mutation testing found it; nothing else did.
-**, 2026-09-01.** Third of three pre-ship audits, and the only
-one that mutated the engine and re-ran the suite. It landed **after** the v0.1 tag was pushed,
+Third of three pre-ship audits, and the only one that mutated the engine and re-ran the suite. It landed **after** the v0.1 tag was pushed,
 because the tag went out when two of three had reported. That was a mistake and it is recorded
 here rather than tidied away: the two audits that read the code found nothing in this area, and
 the one that broke the code on purpose found all of it.
