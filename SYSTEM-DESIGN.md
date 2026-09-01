@@ -390,6 +390,70 @@ about 59,000 assertions, 0.2 seconds.
 diffed against an implementation that shares no code and therefore cannot share a bug. That is a
 far stronger claim than any hand-written test, which only covers what its author thought of.
 
+### D14 - Cancel by id: the index, and two audited removal paths (Phase 4)
+**, 2026-09-01.**
+
+**The gap Blueprint §3.4 names.** A cancel message carries only an **order id**. Without an index,
+finding the order means scanning the book - O(total orders) - and the O(1) cancel claim is silently
+false. Since cancels are 90%+ of real message traffic, that is the difference between a fast engine
+and a slow one.
+
+`std::unordered_map<OrderId, Order*> by_id_` in `OrderBook`.
+
+> [!note] Divergence from Blueprint §3.5, deliberate
+> The Blueprint specifies `OrderHandle { Order* node; Price price; Side side; }`, the extra fields
+> intended to save a cache miss by reaching the level without touching the node.
+> **They buy nothing here.** Every removal dereferences the node anyway - `unlink()` needs
+> `prev`/`next`, and the level total needs `remaining` - so the node's cache line is loaded
+> regardless. What the extra fields *do* add is duplicated state that can drift from the order it
+> describes, which is another thing invariant 2 would have to police.
+> Storing `Order*` alone. If Phase 10 measures a case where the level lookup could usefully be
+> prefetched ahead of the node, revisit.
+
+### Two audited paths, one per layer
+
+- **`OrderBook::remove(Order*)`** - unlink from the level, erase the index entry, advance the
+  cursor if the level emptied. One step, so no caller can do two of the three.
+- **`Engine::retire(Order*)`** - `book_.remove()` then `pool_.release()`.
+
+The book does not own the pool, so the audited step splits at the ownership boundary rather than
+being one function that reaches across it. Each layer audits its own state.
+
+**The retrofit did not hurt, and that is the D9 discipline paying off.** Blueprint §12 lists
+"Phase 4's index retrofit hurting" as one of the things the project exists to teach. The actual
+change to the fill path was **one line**: `unlink` + `on_level_emptied` + `release` became
+`retire(maker)`. That is only true because `unlink()` was already the single removal path from
+Phase 1 rather than surgery inlined into three call sites. The lesson landed by *not* hurting,
+which is worth stating in an interview more than a war story would be.
+
+### `check_invariants()` - all seven
+
+`OrderBook::is_consistent()` covers 1-6; `Engine::check_invariants()` adds 7.
+
+The one worth understanding is **invariant 2** (index coherence). Walking every level and checking
+`find(o->id) == o` catches an index entry pointing at the wrong order. It does **not** catch a
+*stale* entry - an id in the index whose order is in no level at all, i.e. a dangling `Order*`
+pointing into a released pool slot. That is caught by the final line, `counted == by_id_.size()`,
+and by nothing else in the system.
+
+Invariant 7 splits the same way: `free_list_is_consistent()` checks the free list's structure, and
+`pool_.in_use() == book_.resting_count()` checks the accounting. A leaked slot - acquired, dropped,
+never released - is invisible to the first and caught by the second.
+
+**Cancel of an unknown id returns `false`, and that is ROUTINE**, not an error (Blueprint §5.4). A
+fill and a cancel legitimately race, and the fill can win. Treating it as an error would make a
+normal market event look like a defect.
+
+### The oracle now includes cancels
+
+`NaiveBook::cancel()` finds the order by **scanning every price level and every order in it** -
+precisely the O(total orders) walk the index exists to avoid. Writing it out is the clearest
+possible statement of what the index buys, and it means the reference implementation cannot share
+the index's bugs, because it has no index.
+
+3000 operations mixing limits, markets and cancels, with all seven invariants checked after every
+one: ~85,000 assertions, zero diffs.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)

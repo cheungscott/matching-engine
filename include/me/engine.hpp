@@ -3,11 +3,9 @@
 // The only component that decides anything. The book stores, the level orders,
 // the pool recycles; policy lives here.
 //
-// PHASE 1 SCOPE. Partial fills are Phase 2, multi-level walks and market orders
-// Phase 3, cancel Phase 4. The boundary is enforced by an assert, not left to
-// silently do the wrong thing — see D11.
+// Handles NewOrder (limit and market) and Cancel. Amend is CUT from v0.1.
 //
-// Rationale in SYSTEM-DESIGN.md D11. .
+// Rationale in SYSTEM-DESIGN.md D11-D14. .
 #pragma once
 
 #include "me/object_pool.hpp"
@@ -29,6 +27,13 @@ struct NewOrder {
     Price         price{};
     Quantity      quantity{};
     ParticipantId participant{};
+};
+
+// Cancel a resting order by the id the engine assigned at accept time. That id
+// is ALL a real cancel message carries, which is why the book needs an index
+// (Blueprint §3.4).
+struct Cancel {
+    OrderId id{};
 };
 
 class Engine {
@@ -82,11 +87,42 @@ public:
         return id;
     }
 
+    // Cancel a resting order. false means no such order is resting — which is
+    // ROUTINE, not an error: a fill and a cancel legitimately race, and the
+    // fill can win (Blueprint §5.4).
+    bool apply(const Cancel& cmd) noexcept {
+        Order* o = book_.find(cmd.id);
+        if (o == nullptr) {
+            return false;
+        }
+        retire(o);
+        return true;
+    }
+
     [[nodiscard]] OrderBook&       book()       noexcept { return book_; }
     [[nodiscard]] const OrderBook& book() const noexcept { return book_; }
     [[nodiscard]] const ObjectPool<Order>& pool() const noexcept { return pool_; }
 
+    // Blueprint §3.6, all seven. O(range + resting). Tests only.
+    [[nodiscard]] bool check_invariants() const noexcept {
+        if (!book_.is_consistent())            return false;   // 1-6
+        if (!pool_.free_list_is_consistent())  return false;   // 7, structure
+        // 7, the accounting half: every resting order holds exactly one slot,
+        // and nothing else holds one. A leaked slot shows up here and nowhere
+        // else, because the book cannot see a slot it has lost track of.
+        return pool_.in_use() == book_.resting_count();
+    }
+
 private:
+    // THE removal path. book_.remove() drops the order from its level, the
+    // index and the cursor in one step; release() returns the slot. Every
+    // removal in the engine goes through here — fill-to-zero, cancel, and
+    // amend when it arrives — so invariant 7 has exactly one place to break.
+    void retire(Order* o) noexcept {
+        book_.remove(o);
+        pool_.release(o);
+    }
+
     [[nodiscard]] bool validate(const NewOrder& cmd) const noexcept {
         if (cmd.quantity == 0) return false;
         // A market order carries no meaningful price, so the tick-window check
@@ -133,14 +169,7 @@ private:
             remaining -= traded;
 
             if (traded == maker->remaining) {
-                // Fully consumed. Unlink BEFORE releasing, and read the price
-                // before the slot is poisoned (D11).
-                const Price price = maker->price;
-                level->unlink(maker);
-                if (level->empty()) {
-                    book_.on_level_emptied(opposite, price);
-                }
-                pool_.release(maker);
+                retire(maker);              // the one removal path (D14)
             } else {
                 // Partially consumed: it keeps its queue position (D12).
                 level->reduce_front(traded);

@@ -851,3 +851,187 @@ TEST_CASE("differential_engine_matches_the_naive_book", "[phase3][oracle]") {
     // The pool must not have leaked a slot across 2000 operations.
     REQUIRE(real.pool().free_list_is_consistent());
 }
+
+// ===========================================================================
+//  PHASE 4 — cancel by id, the index, and check_invariants()
+// ===========================================================================
+
+TEST_CASE("cancel_removes_a_resting_order", "[phase4][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                          .price = 101, .quantity = 300, .participant = 1}, trades);
+    REQUIRE(eng.book().best_bid().has_value());
+    REQUIRE(eng.pool().in_use() == std::size_t{1});
+
+    CHECK(eng.apply(Cancel{.id = id}));
+
+    CHECK_FALSE(eng.book().best_bid().has_value());
+    CHECK(eng.pool().in_use() == std::size_t{0});   // slot returned, invariant 7
+    CHECK(eng.check_invariants());
+}
+
+TEST_CASE("cancel_of_an_unknown_id_is_routine", "[phase4][engine]") {
+    // Not an error. A fill and a cancel legitimately race and the fill can win.
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 101, .quantity = 300, .participant = 1}, trades);
+
+    CHECK_FALSE(eng.apply(Cancel{.id = 9999}));
+    CHECK(eng.pool().in_use() == std::size_t{1});   // untouched
+    CHECK(eng.check_invariants());
+}
+
+TEST_CASE("cancel_after_the_order_already_filled", "[phase4][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId maker = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                             .price = 102, .quantity = 100, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 100, .participant = 2}, trades);
+    REQUIRE(trades.size() == 1);
+
+    // The order is gone, and its id must NOT still be in the index.
+    CHECK_FALSE(eng.apply(Cancel{.id = maker}));
+    CHECK(eng.check_invariants());
+}
+
+TEST_CASE("cancel_from_the_middle_of_a_level_keeps_fifo", "[phase4][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId a = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                         .price = 102, .quantity = 10, .participant = 1}, trades);
+    const OrderId b = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                         .price = 102, .quantity = 20, .participant = 1}, trades);
+    const OrderId c = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                         .price = 102, .quantity = 30, .participant = 1}, trades);
+
+    CHECK(eng.apply(Cancel{.id = b}));                  // the middle one
+    CHECK(eng.book().depth_at(102) == Quantity{40});    // 10 + 30
+    CHECK(eng.check_invariants());
+
+    // A and C still fill in arrival order.
+    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                       .price = 102, .quantity = 40, .participant = 2}, trades);
+    REQUIRE(trades.size() == 2);
+    CHECK(trades[0].maker_id == a);
+    CHECK(trades[1].maker_id == c);
+    CHECK(eng.check_invariants());
+}
+
+TEST_CASE("cancel_that_empties_the_best_level_advances_the_cursor", "[phase4][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    const OrderId best = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                            .price = 102, .quantity = 10, .participant = 1}, trades);
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 105, .quantity = 10, .participant = 1}, trades);
+    REQUIRE(*eng.book().best_ask() == Price{102});
+
+    CHECK(eng.apply(Cancel{.id = best}));
+    REQUIRE(eng.book().best_ask().has_value());
+    CHECK(*eng.book().best_ask() == Price{105});    // cursor walked outward
+    CHECK(eng.check_invariants());
+}
+
+TEST_CASE("cancel_of_a_non_best_level_leaves_the_cursor_alone", "[phase4][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+
+    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                       .price = 102, .quantity = 10, .participant = 1}, trades);
+    const OrderId deep = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                            .price = 105, .quantity = 10, .participant = 1}, trades);
+
+    CHECK(eng.apply(Cancel{.id = deep}));
+    CHECK(*eng.book().best_ask() == Price{102});    // unmoved
+    CHECK(eng.book().depth_at(105) == Quantity{0});
+    CHECK(eng.check_invariants());
+}
+
+TEST_CASE("cancelling_everything_returns_every_slot", "[phase4][engine]") {
+    Engine eng(kMin, kMax, 64);
+    std::vector<Trade> trades;
+    std::vector<OrderId> ids;
+
+    for (int i = 0; i < 20; ++i) {
+        ids.push_back(eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                         .price = static_cast<Price>(95 + (i % 5)),
+                                         .quantity = 10, .participant = 1}, trades));
+    }
+    REQUIRE(eng.pool().in_use() == std::size_t{20});
+
+    for (OrderId id : ids) CHECK(eng.apply(Cancel{.id = id}));
+
+    CHECK(eng.pool().in_use() == std::size_t{0});
+    CHECK_FALSE(eng.book().best_bid().has_value());
+    CHECK(eng.check_invariants());
+}
+
+TEST_CASE("differential_with_cancels", "[phase4][oracle]") {
+    // The oracle, now including cancels. Every removal path in the engine -
+    // fill-to-zero and cancel - is exercised against an implementation that
+    // finds orders by scanning, so it cannot share the index's bugs.
+    constexpr Price kLo = 98;
+    constexpr Price kHi = 104;
+    constexpr int   kOps = 3000;
+
+    Engine           real(kMin, kMax, 8192);
+    naive::NaiveBook ref(kMin, kMax);
+
+    std::mt19937 rng(20260902u);
+    std::uniform_int_distribution<int> price_of(kLo, kHi);
+    std::uniform_int_distribution<int> qty_of(1, 200);
+    std::uniform_int_distribution<int> roll(0, 99);
+
+    std::vector<OrderId> seen;     // ids ever accepted; many are long gone
+
+    for (int op = 0; op < kOps; ++op) {
+        const int r = roll(rng);
+        INFO("diverged at operation " << op);
+
+        if (r < 25 && !seen.empty()) {
+            // Cancel something. Often already filled, which is the interesting
+            // case: both books must agree it is unknown.
+            std::uniform_int_distribution<std::size_t> pick(0, seen.size() - 1);
+            const OrderId victim = seen[pick(rng)];
+            REQUIRE(real.apply(Cancel{.id = victim}) == ref.cancel(victim));
+        } else {
+            NewOrder cmd{
+                .side        = (r % 2 == 0) ? Side::Buy : Side::Sell,
+                .type        = (r < 32) ? OrderType::Market : OrderType::Limit,
+                .price       = static_cast<Price>(price_of(rng)),
+                .quantity    = static_cast<Quantity>(qty_of(rng)),
+                .participant = 1,
+            };
+
+            std::vector<Trade> got;
+            std::vector<Trade> want;
+            const OrderId got_id  = real.apply(cmd, got);
+            const OrderId want_id = ref.apply(cmd, want);
+
+            REQUIRE(got_id == want_id);
+            REQUIRE(got.size() == want.size());
+            for (std::size_t i = 0; i < got.size(); ++i) {
+                REQUIRE(got[i].maker_id == want[i].maker_id);
+                REQUIRE(got[i].taker_id == want[i].taker_id);
+                REQUIRE(got[i].price    == want[i].price);
+                REQUIRE(got[i].quantity == want[i].quantity);
+            }
+            if (got_id != Engine::kRejected) seen.push_back(got_id);
+        }
+
+        REQUIRE(real.book().best_bid() == ref.best_bid());
+        REQUIRE(real.book().best_ask() == ref.best_ask());
+        for (Price p = kMin; p <= kMax; ++p) {
+            REQUIRE(real.book().depth_at(p) == ref.depth_at(p));
+        }
+        REQUIRE(real.check_invariants());       // all seven, after every operation
+    }
+}
