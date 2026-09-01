@@ -284,14 +284,17 @@ private:
     [[nodiscard]] bool has_bids() const noexcept { return best_bid_ >= min_price_; }
     [[nodiscard]] bool has_asks() const noexcept { return best_ask_ <= max_price_; }
 
+    // Declared BEFORE by_id_ on purpose: members initialise in DECLARATION order,
+    // not member-init-list order, and checked_span() validates the price window.
+    // Validate before allocating the index. -Wreorder catches this if it drifts.
+    std::vector<PriceLevel>    levels_;      // indexed by (price - min_price_)
+    std::vector<std::uint64_t> occupied_;    // D20: one bit per level
+
     // id -> node. THE gap Blueprint §3.4 names: a cancel carries only an id, so
     // without this, finding the order means scanning the book and the O(1)
     // cancel claim is silently false. Fixed capacity, allocates once — see D19
     // for why both previous attempts were wrong.
     IdIndex by_id_;
-
-    std::vector<PriceLevel>    levels_;      // indexed by (price - min_price_)
-    std::vector<std::uint64_t> occupied_;    // D20: one bit per level
     Price min_price_ = 0;
     Price max_price_ = 0;
     Price best_bid_  = 0;                 // == min_price_ - 1 when no bids

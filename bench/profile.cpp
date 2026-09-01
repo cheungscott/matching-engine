@@ -7,7 +7,8 @@
 //
 //   perf stat -e cycles,instructions,cache-misses,branch-misses ./bench_profile cancel
 //
-// Rationale in SYSTEM-DESIGN.md D18.
+// Rationale in SYSTEM-DESIGN.md D19 (the aligned-operator-new blind spot it exists
+// to close is F3).
 #include "me/asan.hpp"
 #include "me/engine.hpp"
 #include "me/types.hpp"
