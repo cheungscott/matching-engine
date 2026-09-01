@@ -243,6 +243,38 @@ is consistent - but it is a judgement call, and Phase 4's `check_invariants()` i
 walkable forwards and broken backwards - the classic intrusive bug), `entry_seq` strictly increasing
 head to tail (invariant 5), walked sum equals the cached total (invariant 4).
 
+### D10 - OrderBook: one tick-indexed array, sentinel cursors (Phase 1)
+**, 2026-09-01.**
+
+- **One `std::vector<PriceLevel>` for BOTH sides**, indexed by `price - min_price`. A level at 101
+  may hold bids while 102 holds asks, in the same array.
+  **This is safe only because of invariant 1**: the book is never crossed, so no price can hold both
+  sides. If a bid and an ask ever shared a price they would land in the same `PriceLevel` and be
+  mixed - the locked-book bug. **The storage layout depends on a matching invariant**; worth saying
+  out loud, because it looks like a bug until you see the reason.
+  *Alternative:* separate `bids_`/`asks_` arrays make side explicit and remove the dependency, at
+  double the level storage. Blueprint §3.5 specifies one array; this follows it.
+- **Cursor sentinels: `best_bid_ = min_price - 1`, `best_ask_ = max_price + 1`.** Chosen so the
+  ordinary comparisons need no special case - any real bid exceeds the empty-bid sentinel, so the
+  first bid ever added is accepted by the same `>` that handles every later one.
+  **Consequence:** the constructor rejects a window touching `Price`'s limits, since the sentinel
+  would be signed overflow, which is UB rather than a wrap you can rely on.
+- **Linear scan to advance a cursor.** The occupancy bitmap + `std::countr_zero` (Blueprint §3.2) is
+  the graduation and belongs in Phase 10, after a profiler asks for it. Know both, ship the simple one.
+  *Subtlety:* the scan's `&&` short-circuit is load-bearing - `best_bid_ >= min_price_` must be
+  tested before `index_of(best_bid_)`, or the scan asserts out of range the moment a side empties.
+- **`add()` asserts `!crosses(...)`.** The book is storage, never policy, and this assert is the one
+  place that separation is *enforced* rather than described. If it fires, the bug is in the match loop.
+- **`crosses()` lives in the book, not the engine**, so the engine's decision and `add()`'s
+  precondition consult the same function and cannot disagree. This is the `>=` / `<=` comparison
+  where a strict inequality leaves a locked book (Blueprint §4.6).
+- **`best_level()` returns a mutable pointer, deliberately.** Blueprint §3.5 calls it a smell to
+  accept: the engine drives the fill loop, so matching policy stays out of the book. The purer
+  `book.fill_at_best()` hides more but drags policy inwards.
+
+**`is_consistent()`** (O(range)): invariant 1 (uncrossed), invariant 3 (a live cursor points at a
+non-empty level), nothing rests strictly inside the spread, and every level's own `is_consistent()`.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)
