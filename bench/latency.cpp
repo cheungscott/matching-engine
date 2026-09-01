@@ -240,7 +240,7 @@ int main() {
 #endif
     );
     std::printf("  build           Bench (-O2, NDEBUG, no sanitizers)\n");
-    std::printf("  runs            %d, fresh engine each; median of per-run percentiles\n", kRuns);
+    std::printf("  runs            %d, fresh engine each; percentiles computed PER RUN then medianed\n", kRuns);
     std::printf("  warm-up         %zu ops discarded before each measured run\n", kWarm);
     std::printf("  measured        %zu ops per run, timed individually\n", kMeasured);
     std::printf("  workload        deterministic, fixed seed; 30%% cancels; ~200 tick band\n");
@@ -264,38 +264,85 @@ int main() {
     std::printf("  meaningful and the far tail as contaminated by the hypervisor. Do NOT\n");
     std::printf("  quote these as pinned-core numbers.\n\n");
 
-    const auto warm     = make_workload(kWarm, 1u);
-    const auto measured = make_workload(kMeasured, 2u);
+    // D21/F13: ONE continuous stream, split into warm and measured.
+    //
+    // Previously the two were generated independently, each numbering its cancel
+    // targets from id 1. By the time the measured stream ran, the engine's
+    // next_id_ was already past everything it tried to cancel, so 92% of cancels
+    // MISSED and `cancel, hit` was 2.4% of samples — the population the "cancel
+    // is 2.4x a rest" conclusion was drawn from. Continuous ids mean the
+    // measured phase cancels orders the warm phase actually rested.
+    const auto stream   = make_workload(kWarm + kMeasured, 1u);
+    const std::vector<Command> warm(stream.begin(), stream.begin() + kWarm);
+    const std::vector<Command> measured(stream.begin() + kWarm, stream.end());
 
-    std::vector<std::vector<std::uint64_t>> per_kind(static_cast<std::size_t>(Kind::kCount));
-    std::vector<std::uint64_t> all;
-    std::vector<double>        throughputs;
+    // D21/F12: percentiles are computed PER RUN and then medianed across runs.
+    //
+    // The previous version pooled all 5 runs and took percentiles of the union,
+    // while printing "median of per-run percentiles". Pooling lets whichever
+    // single run caught the worst hypervisor jitter dominate the tail; a median
+    // across runs is robust to exactly that, which is why the line was written.
+    // The file whose stated purpose is "this program is the methodology" was
+    // misdescribing its own methodology.
+    constexpr int kKinds = static_cast<int>(Kind::kCount);
+    std::vector<std::vector<std::uint64_t>> pct_all;          // per run: p50,p90,p99,p999,max
+    std::vector<std::vector<std::vector<std::uint64_t>>> pct_kind(kKinds);
+    std::vector<std::size_t> n_kind(kKinds, 0);
+    std::vector<double>      throughputs;
+
+    auto five = [](std::vector<std::uint64_t>& v) {
+        std::sort(v.begin(), v.end());
+        return std::vector<std::uint64_t>{percentile(v, 0.50), percentile(v, 0.90),
+                                          percentile(v, 0.99), percentile(v, 0.999),
+                                          v.empty() ? 0 : v.back()};
+    };
 
     for (int r = 0; r < kRuns; ++r) {
         const RunResult res = one_run(warm, measured);
         throughputs.push_back(res.ops_per_sec);
+
+        std::vector<std::vector<std::uint64_t>> bucket(kKinds);
+        std::vector<std::uint64_t> everything;
+        everything.reserve(res.samples.size());
         for (const Sample& s : res.samples) {
-            per_kind[static_cast<std::size_t>(s.kind)].push_back(s.ns);
-            all.push_back(s.ns);
+            bucket[static_cast<std::size_t>(s.kind)].push_back(s.ns);
+            everything.push_back(s.ns);
+        }
+        pct_all.push_back(five(everything));
+        for (int k = 0; k < kKinds; ++k) {
+            n_kind[static_cast<std::size_t>(k)] += bucket[static_cast<std::size_t>(k)].size();
+            pct_kind[static_cast<std::size_t>(k)].push_back(five(bucket[static_cast<std::size_t>(k)]));
         }
     }
 
-    auto report = [&](const char* label, std::vector<std::uint64_t>& v) {
-        if (v.empty()) {
-            std::printf("  %-18s (none)\n", label);
-            return;
-        }
+    auto median_of = [&](const std::vector<std::vector<std::uint64_t>>& runs, std::size_t which) {
+        std::vector<std::uint64_t> v;
+        for (const auto& r : runs) v.push_back(r[which]);
         std::sort(v.begin(), v.end());
-        auto ns = [&](double p) { return static_cast<double>(percentile(v, p)) / tsc_per_ns; };
-        std::printf("  %-18s n=%-8zu p50=%6.0f  p90=%6.0f  p99=%7.0f  p99.9=%8.0f  max=%.0f\n",
-                    label, v.size(), ns(0.50), ns(0.90), ns(0.99), ns(0.999),
-                    static_cast<double>(v.back()) / tsc_per_ns);
+        return v[v.size() / 2];
     };
 
-    std::printf("LATENCY, NANOSECONDS per operation (from cycle counts)\n");
-    report("ALL", all);
-    for (std::size_t i = 0; i < static_cast<std::size_t>(Kind::kCount); ++i) {
-        report(name_of(static_cast<Kind>(i)), per_kind[i]);
+    auto report = [&](const char* label, const std::vector<std::vector<std::uint64_t>>& runs,
+                      std::size_t n) {
+        if (n == 0) { std::printf("  %-18s (none)\n", label); return; }
+        auto ns = [&](std::size_t which) {
+            return static_cast<double>(median_of(runs, which)) / tsc_per_ns;
+        };
+        std::printf("  %-18s n=%-8zu p99.9=%8.0f  p99=%7.0f  max=%9.0f   (p90=%5.0f p50=%5.0f)\n",
+                    label, n, ns(3), ns(2), ns(4), ns(1), ns(0));
+    };
+
+    // p99.9 FIRST, deliberately. Course 2.1: "the mean of a latency distribution
+    // is a number nobody experiences"; the tail is measured at the moment of
+    // maximum economic consequence. An earlier version of this report led with
+    // p50 and a 47% median improvement, which concealed a 2.8x p99.9 REGRESSION
+    // on the dominant operation. Column order is not cosmetic.
+    std::printf("LATENCY, NANOSECONDS per operation — median of per-run percentiles\n");
+    std::printf("  %-18s %-10s %8s  %7s  %9s   %s\n", "", "", "p99.9", "p99", "max", "(p90 / p50)");
+    report("ALL", pct_all, static_cast<std::size_t>(kMeasured) * kRuns);
+    for (int i = 0; i < kKinds; ++i) {
+        report(name_of(static_cast<Kind>(i)), pct_kind[static_cast<std::size_t>(i)],
+               n_kind[static_cast<std::size_t>(i)]);
     }
 
     std::sort(throughputs.begin(), throughputs.end());
