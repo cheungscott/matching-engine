@@ -1321,6 +1321,42 @@ std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
 
 } // namespace
 
+TEST_CASE("a lookup's probe length does not grow with the book", "[phase7][audit]") {
+    // This is the regression that matters most in the file.
+    //
+    // An IDENTITY hash looks ideal for engine ids, which strictly increase: masking spreads
+    // them evenly AND keeps recently issued ids adjacent. But perfect adjacency is MAXIMAL
+    // CLUSTERING: every live entry sits in one contiguous run, and linear probing stops at
+    // the first EMPTY slot, so a lookup landing inside that run walks to the end of it.
+    // The cost of a single miss grows linearly with the number of resting orders.
+    //
+    // Counted, not timed: a stopwatch in a test suite is flaky, and the property here
+    // is structural. If someone reinstates an identity hash this fails immediately.
+    for (const std::size_t live : {1'000u, 4'000u, 16'000u, 64'000u}) {
+        IdIndex            idx(live * 2);
+        std::vector<Order> orders(live);
+        for (std::size_t i = 0; i < live; ++i) {
+            orders[i].id = static_cast<OrderId>(i + 1);
+            idx.insert(orders[i].id, &orders[i]);
+        }
+
+        std::size_t worst = 0;
+        for (std::size_t k = 0; k < 512; ++k) {
+            // Ids that ALIAS onto the front of the id range under a masking hash.
+            // Nothing malformed about them; the engine issues ids like this itself
+            // once next_id_ passes the table size.
+            worst = std::max(worst, Probe::probe_length(
+                idx, static_cast<OrderId>(idx.slot_count() * 4 + 1 + k)));
+        }
+        // The bound is the BLOCK SIZE (64 slots), not the number of live entries, and
+        // that is the whole property: consecutive ids share a block so a run cannot
+        // grow past one, plus a little spill. Under an identity hash it would be
+        // ~live, i.e. 64,000 on the last iteration.
+        INFO("live=" << live << " worst probe=" << worst);
+        CHECK(worst <= 128);
+    }
+}
+
 TEST_CASE("the fuzz generator actually exercises the cancel-hit path", "[phase7][audit]") {
     // A generator that draws cancel ids uniformly over every id ever issued makes most
     // cancels miss, which leaves the most expensive path in the engine (index lookup,
