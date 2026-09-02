@@ -186,7 +186,7 @@ RunResult one_run(const std::vector<Command>& warm, const std::vector<Command>& 
     for (const Command& c : warm) {
         trades.clear();
         if (c.is_cancel) eng.apply(Cancel{c.cancel_id});
-        else             eng.apply(c.order, trades);
+        else             (void)eng.apply(c.order, trades);
     }
 
     RunResult out;
@@ -200,7 +200,7 @@ RunResult one_run(const std::vector<Command>& warm, const std::vector<Command>& 
         if (c.is_cancel) {
             kind = eng.apply(Cancel{c.cancel_id}) ? Kind::Cancel : Kind::Reject;
         } else {
-            eng.apply(c.order, trades);
+            (void)eng.apply(c.order, trades);
             kind = trades.empty() ? Kind::Rest : Kind::Trade;
         }
         const auto t1 = tsc_now();
@@ -238,13 +238,13 @@ RunResult one_run(const std::vector<Command>& warm, const std::vector<Command>& 
         for (const Command& c : warm) {
             rt.clear();
             if (c.is_cancel) raw.apply(Cancel{c.cancel_id});
-            else             raw.apply(c.order, rt);
+            else             (void)raw.apply(c.order, rt);
         }
         const auto s0 = Clock::now();
         for (const Command& c : measured) {
             rt.clear();
             if (c.is_cancel) raw.apply(Cancel{c.cancel_id});
-            else             raw.apply(c.order, rt);
+            else             (void)raw.apply(c.order, rt);
         }
         const double raw_secs = std::chrono::duration<double>(Clock::now() - s0).count();
         out.raw_ops_per_sec = static_cast<double>(measured.size()) / raw_secs;

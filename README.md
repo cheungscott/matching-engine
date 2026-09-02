@@ -9,14 +9,17 @@ separation is the design, and the diagram below labels it: `Engine` decides,
 `OrderBook` stores and never decides to match.
 
 **On the C++23 label**, since it gets abused. The build standard is C++23
-(`CMAKE_CXX_STANDARD 23`, `REQUIRED ON`) and `std::to_underlying` is used where log
-canonicality depends on an enum's underlying type. Most of the modern facilities
-here are C++20: `<bit>`'s `countr_zero`, `countl_zero` and `bit_ceil` do real work
-in the cursor advance and in sizing the id index. Absent, with reasons —
-`std::expected` (the feature this design actually wants, and the top v1.5 item),
-`std::format` and `std::print` all need a newer compiler than the build environment
-has, and `std::flat_map` is deliberately unused because reference instability on
-insert disqualifies it for a design that stores handles into levels.
+(`CMAKE_CXX_STANDARD 23`, `REQUIRED ON`) and two library features earn their place:
+`std::to_underlying` where log canonicality depends on an enum's underlying type, and
+`std::expected` on the reject path, so a refused order returns the reason rather than a
+sentinel id (D28). The second of those moved the **compiler floor to g++ 12** —
+Ubuntu 22.04's default 11.4 cannot build this, and CMake refuses at configure time
+rather than failing as template noise. Most of the other modern facilities here are
+C++20: `<bit>`'s `countr_zero`, `countl_zero` and `bit_ceil` do real work in the cursor
+advance and in sizing the id index. Absent, with reasons — `std::format` and
+`std::print` need g++ 13 and 14, and `std::flat_map` is deliberately unused because
+reference instability on insert disqualifies it for a design that stores handles into
+levels.
 
 > **Status: every v0.1 scope item is complete and green**, including the profiling
 > pass that was the last one outstanding. Amend is cut and the SPSC ring is deferred,
@@ -179,9 +182,19 @@ the test, because a silently sampled check reads as a total one.
 > produces and are believable; **`max` is an upper bound on the environment, not
 > on the engine.**
 
-g++ 11.4, `-O2 -DNDEBUG`, no sanitizers, 5 runs × 200k operations, warm.
+g++ 12.3, `-O2 -DNDEBUG`, no sanitizers, 5 runs × 200k operations, warm. (The
+figures below predate the g++-12 floor; see the compiler note under the re-measurement.)
 Per-operation timing via `rdtscp` + `lfence`; TSC rate measured, not assumed;
 timer floor ~10 ns. Percentiles are computed per run then medianed.
+
+**Workload: synthetic and seeded.** `mt19937` seed 1; prices uniform over a ~200-tick
+band, quantities 1-500, 30% cancels with targets drawn uniformly from live ids, limit
+orders only, one participant. Warm-up and measured phases are one continuous stream, so
+the measured phase cancels orders the warm phase actually rested - they were once
+generated independently and 92% of cancels missed. Because the seed is fixed, repeated
+invocations measure MACHINE variance, not workload variance. Real order flow clusters at
+the touch and arrives in bursts, so treat the tail here as optimistic. **No ITCH or
+LOBSTER data has been ingested.**
 
 **p99.9 first, deliberately** — this is a latency system, and the mean of a
 latency distribution is a number nobody experiences.
@@ -213,8 +226,36 @@ throughput figure was the instrument measuring itself**. Throughput is now measu
 a separate uninstrumented pass over the same workload; the binary prints both, because
 the gap between them is the finding.
 
-Spread across invocations: `all` p99.9 gave 458 / 476 / 478 ns here, but earlier
-invocations on a busier machine gave 531 and 574. Quote a range, never a figure.
+> **RE-MEASURED 2026-09-02, evening: the headline did not reproduce.** Nine invocations
+> across three builds - g++ 11.4 on the shipped source, 11.4 on current source, and 12.3
+> on current source - put `all` p99.9 between **467 and 570 ns**. The 436 ns in the table
+> above is below all nine. The **p50 reproduced** (47 published, 48-53 measured), so the
+> miss is entirely in the tail, which this section already calls environment-dependent.
+> Throughput medians were **22-23 M ops/sec**, with one run of nine reaching 25.9 M, so
+> the 26 M above is a best case and not a median.
+>
+> The table is left standing rather than quietly edited, because the fact that it did not
+> reproduce is the more useful information. **Do not quote a single tail figure from it.**
+> The defensible statements are the p50, a band for the tail, and the number of runs.
+
+Earlier sessions, kept so the drift is visible: `all` p99.9 gave 410 / 436 / 524 ns in the
+session behind the table, 458 / 476 / 478 in one before it, and 531 and 574 on a busier
+machine. Four sessions, four different tails, one published number. **Quote a range, never
+a figure** - and say how many runs it came from.
+
+Two results from that same session, both worth keeping because they are the kind of thing
+usually assumed rather than checked:
+
+- **The compiler is not the variable.** g++ 11.4 and 12.3, identical source, same machine,
+  same seed: medians of 494 and 501 ns against a within-compiler spread of 103 ns. Moving
+  the toolchain floor to 12 (D28) therefore carried no measurement debt - the numbers here
+  are a property of the code, not of one compiler.
+- **D28 itself cost nothing detectable.** Returning `std::expected<OrderId, RejectReason>`
+  from the hot path instead of a bare `OrderId` was A/B tested with both binaries
+  interleaved in one session, five runs each: p99.9 medians 575 → 599 ns, throughput
+  medians 19.5 → 18.9 M ops/sec. Both gaps sit far inside the run-to-run spread of either
+  build (122 and 232 ns respectively), so at n=5 in this environment the difference is
+  **not measurable above noise** - which is a weaker and more honest claim than "free".
 
 `SYSTEM-DESIGN.md` D18 records a rejected id-index design whose reallocation cost
 **8.1 ms in a single operation** at 2M orders. That number belongs to the *rejected*

@@ -131,7 +131,7 @@ Timing run(Book& book, const std::vector<Command>& cmds, std::size_t depth, doub
     const auto b0 = tsc_now();
     for (std::size_t i = 0; i < depth; ++i) {
         trades.clear();
-        book.apply(cmds[i].order, trades);
+        (void)book.apply(cmds[i].order, trades);
     }
     const auto b1 = tsc_now();
 
@@ -153,7 +153,9 @@ Timing run(Book& book, const std::vector<Command>& cmds, std::size_t depth, doub
 struct EngineAdapter {
     Engine eng;
     explicit EngineAdapter(std::size_t cap) : eng(kMin, kMax, cap) {}
-    OrderId apply(const NewOrder& c, std::vector<Trade>& out) { return eng.apply(c, out); }
+    // value_or(0): NaiveBook speaks the 0-means-rejected dialect and the template
+    // times both through one shim, so fold the engine's expected back into it (D28).
+    OrderId apply(const NewOrder& c, std::vector<Trade>& out) { return eng.apply(c, out).value_or(0); }
     bool    cancel(OrderId id) { return eng.apply(Cancel{id}); }
 };
 

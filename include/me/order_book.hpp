@@ -65,7 +65,7 @@ public:
         }
         // D25.8 — the same rule, applied to the id. The block above cites D8's
         // "unconditional for memory corruption" rule and then did not apply it one line
-        // later. IdIndex uses id 0 as its EMPTY marker (as does Engine::kRejected), so
+        // later. IdIndex uses id 0 as its EMPTY marker, and Engine never issues 0, so
         // under NDEBUG a Slot{0, node} was written and still read as empty: never
         // consumed, count_ incremented anyway, the order unremovable and its pool slot
         // leaked, and count_ drifting past the load factor the probe loops depend on.
