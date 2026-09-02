@@ -1,13 +1,22 @@
 # Matching Engine
 
-A single-symbol, price-time-priority limit order book in **C++20**, built with
-`-std=c++23` and using C++23's `std::to_underlying` in the log serialiser.
+A single-symbol **matching engine** in **C++23**: it takes orders, applies
+price-time priority, and emits a sequenced event stream.
 
-That phrasing is deliberate. An earlier version of this file said "in C++23",
-and the codebase used no C++23 feature at all — the newest thing in it was
-designated initializers, which is C++20. `std::expected` is the feature this
-design actually wants, and it needs a newer compiler than the build environment
-has.
+The limit order book is a *component* of that, not a synonym for it — the storage
+layer holding resting orders by price, and within a price by arrival. The
+separation is the design, and the diagram below labels it: `Engine` decides,
+`OrderBook` stores and never decides to match.
+
+**On the C++23 label**, since it gets abused. The build standard is C++23
+(`CMAKE_CXX_STANDARD 23`, `REQUIRED ON`) and `std::to_underlying` is used where log
+canonicality depends on an enum's underlying type. Most of the modern facilities
+here are C++20: `<bit>`'s `countr_zero`, `countl_zero` and `bit_ceil` do real work
+in the cursor advance and in sizing the id index. Absent, with reasons —
+`std::expected` (the feature this design actually wants, and the top v1.5 item),
+`std::format` and `std::print` all need a newer compiler than the build environment
+has, and `std::flat_map` is deliberately unused because reference instability on
+insert disqualifies it for a design that stores handles into levels.
 
 > **Status: every v0.1 scope item is complete and green**, including the profiling
 > pass that was the last one outstanding. Amend is cut and the SPSC ring is deferred,
