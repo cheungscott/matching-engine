@@ -1350,6 +1350,113 @@ The repair is the one the project already knew about and applied in one place: p
 for every branch of every checker, and make the headline gate call the checker that constrains time
 priority.
 
+### D28 - The perf pass, and the unbounded lookup it found in the structure built to remove one
+2026-09-02. D6 defined v0.1 as including *"one honest `perf` pass"* and no counter output existed
+anywhere in the repo: the Phase 10b evidence was allocation counts and latency percentiles.
+`tools/perf-pass.sh` is that pass, written down so the numbers can be regenerated instead of
+quoted from a terminal nobody still has open.
+
+The pass found a defect within its first run, which is the best argument for having done it.
+
+#### The finding: identity hashing made a miss O(resting orders)
+
+The first `perf stat` showed `trade` mode at **76,000 instructions per operation** against ~250 for
+`rest`, and `cancel_miss` so slow the run had to be killed. That is not a tuning observation, it is
+a broken cost curve.
+
+D19 chose an identity hash for `IdIndex`, reasoning that ids are strictly increasing so masking
+*"distributes them perfectly AND keeps recently-issued ids adjacent"*. Both halves are true, and
+the conclusion is backwards: **perfect adjacency is maximal clustering.** Every live entry occupied
+one contiguous run of slots, and linear probing terminates at the first EMPTY slot, so any lookup
+whose home landed inside that run had to walk to the end of it.
+
+Measured against `IdIndex` directly, miss lookups:
+
+| live entries | miss landing outside the run | miss landing inside it |
+|---|---|---|
+| 10,000 | 2.0 ns | **6,172 ns** |
+| 40,000 | 1.1 ns | **27,216 ns** |
+| 320,000 | 1.2 ns | **241,035 ns** |
+
+Linear in the number of resting orders. **241 microseconds for a single cancel lookup.**
+
+And reachable through the public API with nothing malformed - 3,000 resting orders, one large id,
+**60 ns to 1,793 ns**. D19 said it was *"safe because ids are never client-supplied"*; an id does
+not need to be chosen, it only needs to ALIAS into the block, and **the engine issues such ids
+itself as soon as `next_id_` passes the table size**, which any real session does in minutes.
+
+> [!warning] This is D18's rule, inside the structure D19 built to satisfy it
+> *"The allocator's worst case is unbounded, and unbounded is what disqualifies it, not slow."*
+> `IdIndex` replaced an unbounded reallocation with an unbounded probe, and the entry recording
+> that work argued the hash was safe on grounds that were never tested. Three audits read that
+> paragraph and none of them checked it. Running the code did.
+
+#### The fix, and why the obvious one was wrong
+
+**Plain Fibonacci hashing removes the tail and costs 2-3x on the common path.** Measured: `add,
+rested` p50 39 -> 117 ns, throughput 24-30 M -> 14 M ops/sec. The cause is that the table is sized
+from POOL CAPACITY while a book usually holds far fewer orders, so scattering a few thousand live
+entries across a 2M-slot (33 MB) table makes every lookup a cache miss. **The identity hash was
+dodging that by accident** - packing everything into one small hot region is exactly the clustering
+that created the tail.
+
+So: **scatter the block, keep ids adjacent within it.** Consecutive ids share a 64-slot block;
+successive blocks land far apart. Locality is bounded below by the block, probe length bounded
+above by it.
+
+| | add ns/op @16k | cancel ns/op @16k | worst miss probe | tail |
+|---|---|---|---|---|
+| identity | 19.6 | 98.6 | **~live (64,000)** | **unbounded** |
+| Fibonacci | 56.3 | 43.9 | 1 | bounded |
+| **block-scatter** | **18.7** | **55.6** | **64** | **bounded** |
+
+The regression test counts PROBES rather than timing anything, because the property is structural
+and a stopwatch in a test suite is flaky. It asserts the worst probe stays under 128 - one block
+plus spill - at 1,000 through 64,000 live entries. Under the old hash the last of those was 64,000.
+
+Cost accepted: cancel is slower than identity's best case at shallow depth (177 ns vs 120 p50),
+because a scattered probe is a cache miss where a clustered one was not. That is the price of a
+bounded tail and it is the trade this project's own rule mandates.
+
+### D29 - What the counters actually say
+2026-09-02. g++ 11.4 `-O2 -DNDEBUG`, WSL2, 200,000 resting orders, 200,000 measured operations,
+median of 3. Counters are per operation, with the fill-only `none` mode SUBTRACTED - aggregate
+subtraction, not per-region counting, so a few percent between modes means nothing.
+
+| mode | cycles | instructions | IPC | cache misses | branch misses |
+|---|---|---|---|---|---|
+| rest | 117 | 249 | 2.13 | 3.0 | 0.005 |
+| trade | 105 | 239 | 2.28 | 0.5 | 0.009 |
+| **cancel** | **722** | **363** | **0.50** | **13.2** | **1.24** |
+| cancel, miss | 21 | 60 | 2.82 | 1.2 | ~0 |
+
+Three things worth saying, and only one of them is a number.
+
+**Cancel is memory-bound and nothing else is.** IPC 0.50 against 2.1-2.8 everywhere else, on
+*fewer* than 400 instructions. It is not doing more work, it is waiting: 13 cache misses per
+operation against 0.5-3. The pointer chase is inherent to the design - find the node through the
+index, then touch its predecessor and successor to unlink it, then the pool's free list, then
+possibly the occupancy bitmap - and each of those is a separate cache line that nothing warmed.
+This is the one place where a v1.5 optimisation has a measured case behind it rather than an
+argument. It is NOT being done now: D6's gate is one honest pass, and inventing work off the back
+of it is how a measurement pass turns into a rewrite.
+
+**Branch prediction is a non-issue.** 0.005 to 0.009 misses per operation on the add and trade
+paths. The matching loop's branches are almost perfectly predicted, so the `<=` versus `<` crossing
+logic and the side dispatch cost essentially nothing. Any proposal to make this code branchless
+should be refused unless it comes with a counter that contradicts this.
+
+**The cache-miss counts vindicate D7 rather than the tick array.** `rest` touches 3 lines per
+operation, which is about what a one-cache-line `Order` plus its level header and index slot should
+cost. `alignas(64)` was justified in D7 by a straddle count and never by a miss count; this is that
+number.
+
+Limits of the environment, stated because they bound what can be concluded: `L1-dcache-*` and
+`LLC-*` are **not exposed under WSL2** (`<not counted>` / `<not supported>`), so `cache-references`
+and `cache-misses` are the whole cache picture and the level at which they miss is unknown.
+`/usr/bin/perf` refuses on this kernel and the versioned binary underneath is what works;
+`perf_event_paranoid` is 2 so every event is userspace-only, which is what is wanted anyway.
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)

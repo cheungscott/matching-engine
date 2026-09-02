@@ -62,8 +62,8 @@ constexpr Price       kHi   = 10'100;
 //     every other mode did 2,000,000 and the header claimed all modes run against the
 //     same shape. A tenth of the samples, undisclosed.
 // Now: equal op counts everywhere, and a pool with room for fill + rest with margin.
-constexpr std::size_t kFill = 1'000'000;   // resting depth before the measured loop
-constexpr std::size_t kOps  = 1'000'000;
+constexpr std::size_t kFillDefault = 1'000'000;   // resting depth before the measured loop
+constexpr std::size_t kOpsDefault  = 1'000'000;
 
 } // namespace
 
@@ -73,6 +73,11 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "refusing: assertions enabled\n"); return 2;
 #endif
     const std::string mode = (argc > 1) ? argv[1] : "rest";
+    // Depth and op count are arguments so the SHAPE of a cost can be measured, not
+    // just its value at one size. A number that is fine at one depth and quadratic at
+    // another is not the same finding as a number that is simply large.
+    const std::size_t kFill = (argc > 2) ? std::strtoull(argv[2], nullptr, 10) : kFillDefault;
+    const std::size_t kOps  = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : kOpsDefault;
 
     Engine eng(9'000, 11'000, 1 << 22);
     // F9: a reallocation here would be an allocation inside the measured loop,
@@ -124,7 +129,14 @@ int main(int argc, char** argv) {
     std::size_t sink     = 0;
     std::size_t rejected = 0;
 
-    if (mode == "cancel") {
+    if (mode == "none") {
+        // Fill only, measured loop skipped. perf counts the WHOLE process, and the
+        // fill is the same order of magnitude as the measured loop, so a perf stat of
+        // any mode is roughly half setup. Running this mode gives the setup's counters
+        // on their own, to be subtracted. Approximate (aggregate subtraction, not
+        // per-region counting) and stated as such wherever the numbers are used.
+        ops_done = 1;                          // avoid a divide by zero in the report
+    } else if (mode == "cancel") {
         // Cancel orders that exist. Each is a hash lookup, an unlink, an index
         // erase, a pool release, and possibly a cursor advance.
         // D27/R15 — `live` is in insertion order, i.e. strictly ascending ids, and
