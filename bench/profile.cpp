@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     live.reserve(kFill);
     for (std::size_t i = 0; i < kFill; ++i) {
         trades.clear();
-        const OrderId id = eng.apply(NewOrder{
+        const auto id = eng.apply(NewOrder{
             .side = (i % 2 == 0) ? Side::Buy : Side::Sell,
             .type = OrderType::Limit,
             // Bids strictly below asks, so this fill never trades: the point is
@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
                                                      : kHi + 1 + (i % 50)),
             .quantity = static_cast<Quantity>(qty_of(rng)),
             .participant = 1}, trades);
-        if (id != Engine::kRejected) live.push_back(id);
+        if (id.has_value()) live.push_back(*id);
     }
 
     // Precomputed BEFORE the counters are reset, for the same reason the book is built
@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
         // Cross the spread every time.
         for (std::size_t n = 0; n < kOps; ++n) {
             trades.clear();
-            eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+            (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                                .price = static_cast<Price>(kHi + 60),
                                .quantity = 1, .participant = 1}, trades);
             sink += trades.size();
@@ -173,11 +173,11 @@ int main(int argc, char** argv) {
         // the stated reason it carries no timing code. Precomputed instead.
         for (std::size_t n = 0; n < kOps; ++n) {
             trades.clear();
-            const OrderId id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                                  .price = prices[n],
+            const auto id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                               .price = prices[n],
                                                   .quantity = 1, .participant = 1}, trades);
-            if (id == Engine::kRejected) ++rejected;
-            sink += id;
+            if (!id.has_value()) ++rejected;
+            sink += id.value_or(0);
             ++ops_done;
         }
     }

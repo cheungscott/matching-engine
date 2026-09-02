@@ -28,7 +28,9 @@ public:
     NaiveBook(Price min_price, Price max_price) noexcept
         : min_price_(min_price), max_price_(max_price) {}
 
-    // Same contract as Engine::apply. 0 means rejected.
+    // Deliberately NOT Engine::apply's contract any more: the engine returns
+    // expected<OrderId, RejectReason> (D28); the oracle keeps the 0 sentinel so it
+    // stays the dumb implementation you can check by eye. Callers fold with value_or(0).
     OrderId apply(const NewOrder& cmd, std::vector<Trade>& out) {
         if (cmd.quantity == 0) return 0;
         if (cmd.type == OrderType::Limit &&

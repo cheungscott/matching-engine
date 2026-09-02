@@ -1457,6 +1457,140 @@ and `cache-misses` are the whole cache picture and the level at which they miss 
 `/usr/bin/perf` refuses on this kernel and the versioned binary underneath is what works;
 `perf_event_paranoid` is 2 so every event is userspace-only, which is what is wanted anyway.
 
+
+### D28 - The reject path returns the reason, not a sentinel (v1.5)
+
+`Engine::apply(NewOrder)` returned `OrderId`, with `kRejected = 0` standing in for "refused".
+The caller learned THAT an order failed and never WHY - even though `validate()` had already
+computed a typed `RejectReason` one line earlier and thrown it away at the boundary. The
+information existed; the signature had nowhere to put it.
+
+It now returns `std::expected<OrderId, RejectReason>`, marked `[[nodiscard]]`.
+
+#### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| Keep the sentinel, add a `RejectReason*` out-parameter | Two return channels for one outcome, and nothing forces a caller to pass it. The information stays optional, which is how it got lost the first time. |
+| Throw on reject | A reject is **routine**, not exceptional - a malformed or out-of-band order is ordinary traffic at a venue. Putting a throw on a normal branch of the hot path trades a return value for stack unwinding. |
+| `std::optional<OrderId>` | Says "no id" without saying why. That is the sentinel with better manners. |
+| Convert `apply(Cancel)` to `expected<void, RejectReason>` too | **Deliberately not done.** It has exactly one failure mode, `UnknownOrder`, already named in the event it emits, so the expected could hold precisely one error value and would carry nothing a `bool` does not. It also stays `noexcept`. Symmetry is not a reason. |
+
+#### What `[[nodiscard]]` bought, concretely
+
+The attribute is the half that pays. Without it a caller can drop the reason exactly as before, and
+the change is decorative. With it the compiler enumerated every site that had been discarding the
+outcome: **46 in the test suite, 4 in `bench/latency.cpp`, 1 in `tests/scenario.hpp`, 3 in the
+profile and baseline shims.**
+
+Two of those were places where the sentinel had been quietly load-bearing:
+
+- `bench/profile.cpp` counted rejects with `id == kRejected`. It now asks `!id.has_value()`, which
+  is the same test written in a form that cannot be confused with a valid id.
+- `bench/baseline.cpp`'s `EngineAdapter` and the differential harness both compare against
+  `NaiveBook`, which still speaks the 0-means-rejected dialect. They fold with `value_or(0)`,
+  named at each site. The oracle was left alone on purpose: it earns its keep by being the dumb
+  implementation you can check by eye, and mirroring the engine's return type would make it
+  marginally less independent.
+
+Three reject tests now assert **which** reason fired (`MalformedOrder` for a bad `OrderType`, for a
+bad `Side`, and `InvalidQuantity` for the over-cap quantity) rather than "not accepted". That is a
+strictly stronger assertion: the old form passed if the order was refused for any reason at all,
+including the wrong one.
+
+#### What it cost
+
+**The compiler floor moved to g++ 12.** `std::expected` is libstdc++ 12; Ubuntu 22.04 defaults to
+11.4. `CMakeLists.txt` now refuses at configure time with the fix in the message, rather than
+letting it fail as several screens of template errors that never name the cause.
+
+The C++23 position changes with it. `std::to_underlying` in the log serialiser was the only
+C++23 library feature in the codebase; there are now two, and the second is the one Blueprint §7
+called the flagship.
+
+#### The sentinel's other half survives, and is now in the right place
+
+`0` is still never issued as an order id, because `IdIndex` uses it as its EMPTY marker. That
+constraint had been conflated with "rejected" - one magic value carrying two unrelated meanings in
+three files. `kRejected` is gone; `next_id_` still starts at 1, and the comments in `id_index.hpp`
+and `order_book.hpp` now give the actual reason.
+
+**Revisit trigger:** if a rejection ever needs to carry more than one datum - which field, what
+bound - `RejectReason` becomes a struct and `expected` already has somewhere to put it. That was
+not true of the sentinel.
+
+#### F26 - FIXED 2026-09-02: `IdIndex::home()` shifted by more than 63 for small tables
+
+Found by UBSan while running the suite for this change, in code this change does not touch.
+
+```
+id_index.hpp:167: runtime error: shift exponent 65 is too large for 64-bit type
+```
+
+`shift_` is `64 - log2(table_size)` and `home()` shifts by `shift_ + 6`. The shift is only
+defined while `shift_ + 6 <= 63`, i.e. `table_size >= 128`, i.e. **pool capacity >= 64**. Several
+tests construct `Engine(kMin, kMax, 1)` and `(…, 64)`; capacity 1 gives a 2-slot table, `shift_`
+63, and a shift of 69.
+
+On x86 the hardware masks the shift count to 6 bits, so `>> 69` executes as `>> 5`: a
+wrong-but-deterministic block index. That is why every test still passes and why the differential
+never caught it - correctness does not depend on hash quality, only on the hash being a function.
+What it does undermine is the **bounded-probe argument of D19**, which assumes the intended
+scatter, and it is undefined behaviour that a different optimiser is free to treat differently.
+
+The trigger predates this change: the code and the capacity-1 tests were both already there.
+
+#### The fix, and why the threshold is 58 rather than a patched-in number
+
+When the table holds at most one 64-slot block there is no block to scatter, so the block index
+should be zero and the intra-block term does all the work - which degenerates to exactly the
+neighbours-stay-together scheme that is correct at that size, since a table of 64 slots or fewer
+has nowhere for a run to pile up.
+
+```cpp
+const std::uint64_t blk = (shift_ >= 58)
+                        ? 0
+                        : ((v / kBlock) * kPhi) >> (shift_ + 6);
+```
+
+`shift_ >= 58` says "the table is 64 slots or fewer". The two conditions that matter turn out to
+be the same condition, which is the sign this is the real boundary and not a clamp:
+
+| capacity | table | `shift_` | shift amount | |
+|---|---|---|---|---|
+| 1 | 2 | 63 | 69 | undefined → guard, `blk = 0` |
+| 32 | 64 | 58 | 64 | undefined → guard, `blk = 0` |
+| 64 | 128 | 57 | 63 | legal, and 63 is the largest legal shift |
+
+Capacity 64 is both the first size at which a second block exists and the first size at which the
+shift is defined. One comparison covers both because they are the same fact.
+
+**A branch was added to `home()`, which is on the lookup path.** `shift_` is fixed for the life of
+the index, so the branch should predict perfectly after the first call - but *should* is an
+argument, not a measurement, and this log has been wrong that way before (D21). So it was measured:
+both binaries kept, interleaved in one session, five runs each.
+
+| | p99.9 median | p50 median | throughput median |
+|---|---|---|---|
+| before the guard | 481 ns | 49 ns | 21.5 M ops/sec |
+| after the guard | 465 ns | 49 ns | 21.2 M ops/sec |
+
+**No measurable cost.** p50 is identical, and the two remaining differences point in opposite
+directions - the tail median came out 16 ns *faster* with the extra branch, which a branch cannot
+do. That contradiction is the useful part of the result: it says the spread is dominating, not the
+change. Ranges overlap almost entirely (478-525 against 438-503; 20.6-25.1 M against 21.0-24.7 M).
+
+The alternative - folding the shift into a precomputed mask so no branch exists - was not pursued:
+there is no measured cost to remove, and it would trade a line anyone can read for one they cannot.
+
+#### Verification
+
+- The UBSan diagnostic is **gone**: the identical command that printed
+  `id_index.hpp:167: runtime error` now prints nothing.
+- Suite still green: 88 cases, 152,953 assertions.
+- Phase 7 gate re-run after the fix: **758,717 assertions, 3 test cases, exit 0**.
+
+
 ---
 
 ## Open questions (from the Blueprint's critique — decide as you reach them)

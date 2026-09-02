@@ -26,6 +26,16 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# D28. `std::expected` on the reject path needs libstdc++ 12. Under 11.4 the failure
+# is several screens of template errors that never name the cause, so refuse early and
+# say what to do instead.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+  message(FATAL_ERROR
+    "g++ ${CMAKE_CXX_COMPILER_VERSION} cannot build this project: std::expected needs g++ 12 "
+    "or newer. Ubuntu 22.04 defaults to 11.4 - run `sudo apt install g++-12`, then configure "
+    "with -DCMAKE_CXX_COMPILER=g++-12.")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Debug | TSan | Bench" FORCE)
 endif()
