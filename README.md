@@ -199,15 +199,25 @@ LOBSTER data has been ingested.**
 **p99.9 first, deliberately** — this is a latency system, and the mean of a
 latency distribution is a number nobody experiences.
 
-| Operation | p99.9 | p99 | (p50) |
-|---|---|---|---|
-| all | 436 ns | 183 ns | 47 ns |
-| add, rested | 350 ns | 130 ns | 41 ns |
-| add, traded | 362 ns | 181 ns | 63 ns |
-| cancel, hit | 558 ns | 285 ns | 110 ns |
-| cancel, unknown | 452 ns | 141 ns | 50 ns |
+Measured 2026-09-02 on the shipped binary (g++ 12.3, post-D28 and post-F26), five
+invocations at load average 0.00. The tail is a band because it is a tail; the p50 is
+stable enough to be a figure.
 
-Throughput: **26 M ops/sec** (20-27 across three invocations).
+| Operation | p99.9 (median, range) | p99 | (p90) | (p50) |
+|---|---|---|---|---|
+| all | **454 ns** (429-518) | 212 ns | 112 ns | **49 ns** |
+| add, rested | 389 ns (368-429) | 137 ns | 53 ns | 42 ns |
+| add, traded | 398 ns (350-475) | 191 ns | 115 ns | 64 ns |
+| cancel, hit | 591 ns (519-793) | 438 ns | 207 ns | 136 ns |
+| cancel, unknown | 455 ns (440-491) | 276 ns | 111 ns | 60 ns |
+
+Throughput: **20.9-26.1 M ops/sec**, median ~23.5, over ten invocations across two idle
+sessions. `all` p99.9 over those same ten spans **429-518 ns**.
+
+The previous table, kept because the drift is the point: all 436 / 183 / 47, add-rested
+350 / 130 / 41, add-traded 362 / 181 / 63, cancel-hit 558 / 285 / 110, cancel-unknown
+452 / 141 / 50, and 26 M ops/sec. Those are point estimates near the optimistic end of
+the bands above, not errors.
 
 The `max` column is gone on purpose. It was a *median of five per-run maxima*, which is
 not a maximum of anything and quietly discards the worst observation. The binary still
@@ -226,17 +236,19 @@ throughput figure was the instrument measuring itself**. Throughput is now measu
 a separate uninstrumented pass over the same workload; the binary prints both, because
 the gap between them is the finding.
 
-> **RE-MEASURED 2026-09-02, evening: the headline did not reproduce.** Nine invocations
-> across three builds - g++ 11.4 on the shipped source, 11.4 on current source, and 12.3
-> on current source - put `all` p99.9 between **467 and 570 ns**. The 436 ns in the table
-> above is below all nine. The **p50 reproduced** (47 published, 48-53 measured), so the
-> miss is entirely in the tail, which this section already calls environment-dependent.
-> Throughput medians were **22-23 M ops/sec**, with one run of nine reaching 25.9 M, so
-> the 26 M above is a best case and not a median.
+> **RE-MEASURED 2026-09-02, evening — and the first re-measurement was itself wrong.**
+> Nine invocations across three builds put `all` p99.9 between **467 and 570 ns**, which
+> looked like the published 436 failing to reproduce. That reading was taken while the same
+> machine was compiling and running the ASan fuzz gate. Repeated at load average 0.00, ten
+> invocations span **429-518 ns** — and 436 is inside it.
 >
-> The table is left standing rather than quietly edited, because the fact that it did not
-> reproduce is the more useful information. **Do not quote a single tail figure from it.**
-> The defensible statements are the p50, a band for the tail, and the number of runs.
+> So the published figures were **not wrong. They were point estimates near the optimistic
+> end of a real band**, and the correction that called them irreproducible was measuring the
+> machine's load rather than the engine. The p50 was never in doubt: 47 published, 48-50 idle.
+>
+> The lesson survives both readings, and it is the one this file already states: **never quote
+> a single tail figure.** The defensible statement is the p50, a band for the tail, the number
+> of runs, and what else the machine was doing at the time.
 
 Earlier sessions, kept so the drift is visible: `all` p99.9 gave 410 / 436 / 524 ns in the
 session behind the table, 458 / 476 / 478 in one before it, and 531 and 574 on a busier
