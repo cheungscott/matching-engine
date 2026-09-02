@@ -116,7 +116,7 @@ private:
         Order*  node = nullptr;
     };
 
-    // 0 is never a valid order id — Engine reserves it as kRejected — so it is
+    // 0 is never a valid order id — Engine issues from 1 — so it is
     // free to mean "empty" without a separate occupancy bit.
     static constexpr OrderId kEmpty = 0;
 
@@ -161,7 +161,11 @@ private:
         constexpr std::uint64_t kPhi   = 0x9E37'79B9'7F4A'7C15ULL;
         constexpr std::uint64_t kBlock = 64;
         const std::uint64_t     v      = static_cast<std::uint64_t>(id);
-        const std::uint64_t     blk    = ((v / kBlock) * kPhi) >> (shift_ + 6);
+        // At <= 64 slots the table IS one block - nothing to scatter, and
+        // shift_ + 6 would exceed 63, which is undefined.
+        const std::uint64_t     blk    = (shift_ >= 58)
+                                       ? 0
+                                       : ((v / kBlock) * kPhi) >> (shift_ + 6);
         return static_cast<std::size_t>(((blk * kBlock) + (v % kBlock)) & mask_);
     }
 

@@ -486,7 +486,7 @@ TEST_CASE("engine_rests_an_order_on_an_empty_book", "[phase1][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 101, .quantity = 300, .participant = 1}, trades);
 
     CHECK(trades.size() == std::size_t{0});
@@ -498,9 +498,9 @@ TEST_CASE("engine_does_not_match_when_it_does_not_cross", "[phase1][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 101, .quantity = 100, .participant = 2}, trades);
 
     CHECK(trades.size() == std::size_t{0});
@@ -512,9 +512,9 @@ TEST_CASE("engine_exact_full_fill_at_one_price", "[phase1][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 2}, trades);
 
     CHECK(trades.size() == std::size_t{1});
@@ -534,9 +534,9 @@ TEST_CASE("engine_prints_the_trade_at_the_makers_price", "[phase1][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 103, .quantity = 100, .participant = 2}, trades);
 
     CHECK(trades.size() == std::size_t{1});
@@ -550,9 +550,9 @@ TEST_CASE("engine_treats_equal_prices_as_crossing", "[phase1][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 101, .quantity = 100, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 101, .quantity = 100, .participant = 2}, trades);
 
     CHECK(trades.size() == std::size_t{1});
@@ -570,10 +570,10 @@ TEST_CASE("engine_attributes_maker_and_taker", "[phase1][engine]") {
 
     const OrderId maker = eng.apply(
         NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                 .price = 102, .quantity = 100, .participant = 1}, trades);
+                 .price = 102, .quantity = 100, .participant = 1}, trades).value();
     const OrderId taker = eng.apply(
         NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                 .price = 102, .quantity = 100, .participant = 2}, trades);
+                 .price = 102, .quantity = 100, .participant = 2}, trades).value();
 
     CHECK(trades.size() == std::size_t{1});
     if (trades.size() == 1) {
@@ -608,8 +608,8 @@ TEST_CASE("engine_partial_fill_of_the_resting_order", "[phase2][engine]") {
     std::vector<Trade> trades;
 
     const OrderId maker = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                             .price = 102, .quantity = 200, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                             .price = 102, .quantity = 200, .participant = 1}, trades).value();
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 50, .participant = 2}, trades);
 
     REQUIRE(trades.size() == 1);
@@ -628,9 +628,9 @@ TEST_CASE("engine_partial_fill_of_the_incoming_order", "[phase2][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 60, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 2}, trades);
 
     REQUIRE(trades.size() == 1);
@@ -648,10 +648,10 @@ TEST_CASE("engine_consumes_a_level_in_fifo_order", "[phase2][engine]") {
     std::vector<Trade> trades;
 
     const OrderId first  = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                              .price = 102, .quantity = 100, .participant = 1}, trades);
+                                              .price = 102, .quantity = 100, .participant = 1}, trades).value();
     const OrderId second = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                              .price = 102, .quantity = 150, .participant = 2}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                              .price = 102, .quantity = 150, .participant = 2}, trades).value();
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 250, .participant = 3}, trades);
 
     REQUIRE(trades.size() == 2);
@@ -671,10 +671,10 @@ TEST_CASE("engine_stops_mid_level_leaving_the_second_maker_partly_filled", "[pha
     std::vector<Trade> trades;
 
     const OrderId first  = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                              .price = 102, .quantity = 100, .participant = 1}, trades);
+                                              .price = 102, .quantity = 100, .participant = 1}, trades).value();
     const OrderId second = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                              .price = 102, .quantity = 150, .participant = 2}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                              .price = 102, .quantity = 150, .participant = 2}, trades).value();
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 180, .participant = 3}, trades);
 
     REQUIRE(trades.size() == 2);
@@ -693,11 +693,11 @@ TEST_CASE("engine_pool_returns_every_fully_consumed_maker", "[phase2][engine]") 
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 1}, trades);
     CHECK(eng.pool().in_use() == std::size_t{1});
 
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 2}, trades);
 
     CHECK(eng.pool().in_use() == std::size_t{0});   // maker returned, taker never rested
@@ -714,13 +714,13 @@ TEST_CASE("engine_walks_two_price_levels", "[phase3][engine]") {
     std::vector<Trade> trades;
 
     const OrderId a3 = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                          .price = 102, .quantity = 100, .participant = 1}, trades);
+                                          .price = 102, .quantity = 100, .participant = 1}, trades).value();
     const OrderId a4 = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                          .price = 102, .quantity = 150, .participant = 1}, trades);
+                                          .price = 102, .quantity = 150, .participant = 1}, trades).value();
     const OrderId a5 = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                          .price = 103, .quantity = 200, .participant = 1}, trades);
+                                          .price = 103, .quantity = 200, .participant = 1}, trades).value();
 
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 103, .quantity = 300, .participant = 2}, trades);
 
     REQUIRE(trades.size() == 3);
@@ -743,11 +743,11 @@ TEST_CASE("engine_price_improvement_across_the_sweep", "[phase3][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 101, .quantity = 50, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 50, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 104, .quantity = 100, .participant = 2}, trades);
 
     REQUIRE(trades.size() == 2);
@@ -760,13 +760,13 @@ TEST_CASE("engine_market_order_sweeps_and_never_rests", "[phase3][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 40, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 105, .quantity = 40, .participant = 1}, trades);
 
     // Wants 200, only 80 exists. Takes it all and cancels the rest.
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
                        .price = 0, .quantity = 200, .participant = 2}, trades);
 
     REQUIRE(trades.size() == 2);
@@ -781,10 +781,10 @@ TEST_CASE("engine_market_order_into_an_empty_book", "[phase3][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    const OrderId id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
-                                          .price = 0, .quantity = 100, .participant = 1}, trades);
+    const auto id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+                                       .price = 0, .quantity = 100, .participant = 1}, trades);
 
-    CHECK(id != Engine::kRejected);          // accepted, then cancelled for no liquidity
+    CHECK(id.has_value());                   // accepted, then cancelled for no liquidity
     CHECK(trades.empty());
     CHECK_FALSE(eng.book().best_bid().has_value());
     CHECK(eng.pool().in_use() == std::size_t{0});
@@ -796,9 +796,9 @@ TEST_CASE("engine_boundary_at_or_better_includes_equal", "[phase3][engine]") {
 
     SECTION("sell into a bid at exactly the same price") {
         std::vector<Trade> trades;
-        eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+        (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                            .price = 101, .quantity = 100, .participant = 1}, trades);
-        eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+        (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                            .price = 101, .quantity = 100, .participant = 2}, trades);
         REQUIRE(trades.size() == 1);
         CHECK(trades[0].price == Price{101});
@@ -807,9 +807,9 @@ TEST_CASE("engine_boundary_at_or_better_includes_equal", "[phase3][engine]") {
 
     SECTION("one tick away does NOT cross") {
         std::vector<Trade> trades;
-        eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+        (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                            .price = 100, .quantity = 100, .participant = 1}, trades);
-        eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+        (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                            .price = 101, .quantity = 100, .participant = 2}, trades);
         CHECK(trades.empty());
         check_bbo(eng.book().best_bid(), 100);
@@ -855,7 +855,7 @@ TEST_CASE("differential_engine_matches_the_naive_book", "[phase3][oracle]") {
 
         std::vector<Trade> got;
         std::vector<Trade> want;
-        const OrderId got_id  = real.apply(cmd, got);
+        const OrderId got_id  = real.apply(cmd, got).value_or(0);   // oracle dialect
         const OrderId want_id = ref.apply(cmd, want);
 
         INFO("diverged at operation " << op);
@@ -889,7 +889,7 @@ TEST_CASE("cancel_removes_a_resting_order", "[phase4][engine]") {
     std::vector<Trade> trades;
 
     const OrderId id = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                          .price = 101, .quantity = 300, .participant = 1}, trades);
+                                          .price = 101, .quantity = 300, .participant = 1}, trades).value();
     REQUIRE(eng.book().best_bid().has_value());
     REQUIRE(eng.pool().in_use() == std::size_t{1});
 
@@ -905,7 +905,7 @@ TEST_CASE("cancel_of_an_unknown_id_is_routine", "[phase4][engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 101, .quantity = 300, .participant = 1}, trades);
 
     CHECK_FALSE(eng.apply(Cancel{.id = 9999}));
@@ -918,8 +918,8 @@ TEST_CASE("cancel_after_the_order_already_filled", "[phase4][engine]") {
     std::vector<Trade> trades;
 
     const OrderId maker = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                             .price = 102, .quantity = 100, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                             .price = 102, .quantity = 100, .participant = 1}, trades).value();
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 100, .participant = 2}, trades);
     REQUIRE(trades.size() == 1);
 
@@ -933,18 +933,18 @@ TEST_CASE("cancel_from_the_middle_of_a_level_keeps_fifo", "[phase4][engine]") {
     std::vector<Trade> trades;
 
     const OrderId a = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                         .price = 102, .quantity = 10, .participant = 1}, trades);
+                                         .price = 102, .quantity = 10, .participant = 1}, trades).value();
     const OrderId b = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                         .price = 102, .quantity = 20, .participant = 1}, trades);
+                                         .price = 102, .quantity = 20, .participant = 1}, trades).value();
     const OrderId c = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                         .price = 102, .quantity = 30, .participant = 1}, trades);
+                                         .price = 102, .quantity = 30, .participant = 1}, trades).value();
 
     CHECK(eng.apply(Cancel{.id = b}));                  // the middle one
     CHECK(eng.book().depth_at(102) == Quantity{40});    // 10 + 30
     CHECK(eng.check_invariants());
 
     // A and C still fill in arrival order.
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 40, .participant = 2}, trades);
     REQUIRE(trades.size() == 2);
     CHECK(trades[0].maker_id == a);
@@ -957,8 +957,8 @@ TEST_CASE("cancel_that_empties_the_best_level_advances_the_cursor", "[phase4][en
     std::vector<Trade> trades;
 
     const OrderId best = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                            .price = 102, .quantity = 10, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+                                            .price = 102, .quantity = 10, .participant = 1}, trades).value();
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 105, .quantity = 10, .participant = 1}, trades);
     check_bbo(eng.book().best_ask(), 102);
 
@@ -972,10 +972,10 @@ TEST_CASE("cancel_of_a_non_best_level_leaves_the_cursor_alone", "[phase4][engine
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                        .price = 102, .quantity = 10, .participant = 1}, trades);
     const OrderId deep = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                            .price = 105, .quantity = 10, .participant = 1}, trades);
+                                            .price = 105, .quantity = 10, .participant = 1}, trades).value();
 
     CHECK(eng.apply(Cancel{.id = deep}));
     check_bbo(eng.book().best_ask(), 102);    // unmoved
@@ -991,7 +991,7 @@ TEST_CASE("cancelling_everything_returns_every_slot", "[phase4][engine]") {
     for (int i = 0; i < 20; ++i) {
         ids.push_back(eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                                          .price = static_cast<Price>(95 + (i % 5)),
-                                         .quantity = 10, .participant = 1}, trades));
+                                         .quantity = 10, .participant = 1}, trades).value());
     }
     REQUIRE(eng.pool().in_use() == std::size_t{20});
 
@@ -1041,7 +1041,9 @@ TEST_CASE("differential_with_cancels", "[phase4][oracle]") {
 
             std::vector<Trade> got;
             std::vector<Trade> want;
-            const OrderId got_id  = real.apply(cmd, got);
+            // value_or(0): the oracle returns 0 for a rejected order, so fold the engine's
+            // std::expected into that dialect to compare like with like.
+            const OrderId got_id  = real.apply(cmd, got).value_or(0);
             const OrderId want_id = ref.apply(cmd, want);
 
             REQUIRE(got_id == want_id);
@@ -1052,7 +1054,7 @@ TEST_CASE("differential_with_cancels", "[phase4][oracle]") {
                 REQUIRE(got[i].price    == want[i].price);
                 REQUIRE(got[i].quantity == want[i].quantity);
             }
-            if (got_id != Engine::kRejected) seen.push_back(got_id);
+            if (got_id != 0) seen.push_back(got_id);
         }
 
         REQUIRE(real.book().best_bid() == ref.best_bid());
@@ -1157,9 +1159,9 @@ TEST_CASE("two market orders differing only in junk price log identically",
         VectorSink sink;
         eng.set_sink(&sink);
         std::vector<Trade> out;
-        eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
+        (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
                            .price = 100, .quantity = 10, .participant = 1}, out);
-        eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+        (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
                            .price = junk, .quantity = 4, .participant = 2}, out);
         return to_log(sink.events());
     };
@@ -1174,17 +1176,17 @@ TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
     std::vector<Trade> trades;
 
     const OrderId maker = eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit,
-                                             .price = 102, .quantity = 100, .participant = 1}, trades);
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                             .price = 102, .quantity = 100, .participant = 1}, trades).value();
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 102, .quantity = 40, .participant = 2}, trades);
     eng.apply(Cancel{.id = maker});
     eng.apply(Cancel{.id = 9999});                                   // unknown
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 999, .quantity = 10, .participant = 3}, trades);  // out of range
 
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
                        .price = 100, .quantity = 0, .participant = 3}, trades);   // qty 0
-    eng.apply(NewOrder{.side = Side::Buy, .type = static_cast<OrderType>(9),
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = static_cast<OrderType>(9),
                        .price = 100, .quantity = 5, .participant = 3}, trades);   // malformed
 
     const auto& ev = sink.events();
@@ -1211,7 +1213,7 @@ TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
     // Rejections consume no order id: four precede this order, so its id must still be
     // maker + 2.
     const OrderId after = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                             .price = 95, .quantity = 5, .participant = 4}, trades);
+                                             .price = 95, .quantity = 5, .participant = 4}, trades).value();
     CHECK(after == maker + 2);
 }
 
@@ -1221,7 +1223,7 @@ TEST_CASE("market_remainder_is_cancelled_with_no_liquidity", "[phase6][events]")
     eng.set_sink(&sink);
     std::vector<Trade> trades;
 
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Market,
                        .price = 0, .quantity = 100, .participant = 1}, trades);
 
     const auto& ev = sink.events();
@@ -1239,7 +1241,7 @@ TEST_CASE("sequence_numbers_never_go_backwards", "[phase6][events]") {
     std::vector<Trade> scratch;
     for (const auto& c : cmds) {
         scratch.clear();
-        if (const auto* n = std::get_if<NewOrder>(&c)) eng.apply(*n, scratch);
+        if (const auto* n = std::get_if<NewOrder>(&c)) (void)eng.apply(*n, scratch);
         else                                           eng.apply(*std::get_if<Cancel>(&c));
     }
 
@@ -1304,7 +1306,7 @@ void feed(Engine& eng, const std::vector<scenario::Command>& cmds) {
     std::vector<Trade> scratch;
     for (const auto& c : cmds) {
         scratch.clear();
-        if (const auto* n = std::get_if<NewOrder>(&c)) eng.apply(*n, scratch);
+        if (const auto* n = std::get_if<NewOrder>(&c)) (void)eng.apply(*n, scratch);
         else                                           eng.apply(*std::get_if<Cancel>(&c));
     }
 }
@@ -1370,7 +1372,7 @@ TEST_CASE("the fuzz generator actually exercises the cancel-hit path", "[phase7]
 
     for (const auto& c : cmds) {
         out.clear();
-        if (const auto* n = std::get_if<NewOrder>(&c)) { eng.apply(*n, out); }
+        if (const auto* n = std::get_if<NewOrder>(&c)) { (void)eng.apply(*n, out); }
         else { ++cancels; hits += eng.apply(*std::get_if<Cancel>(&c)) ? 1u : 0u; }
     }
 
@@ -1750,12 +1752,12 @@ TEST_CASE("every conservation branch that CAN fire has a planted violation",
     VectorSink sink;
     eng.set_sink(&sink);
     std::vector<Trade> out;
-    const OrderId a = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                         .price = 100, .quantity = 10, .participant = 1}, out);
-    const OrderId b = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                         .price = 101, .quantity = 20, .participant = 1}, out);
-    REQUIRE(a != Engine::kRejected);
-    REQUIRE(b != Engine::kRejected);
+    const auto a = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                      .price = 100, .quantity = 10, .participant = 1}, out);
+    const auto b = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                      .price = 101, .quantity = 20, .participant = 1}, out);
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
 
     const std::vector<Event> clean = sink.events();
     REQUIRE(props::check_conservation(clean, eng.book()).ok);
@@ -1802,11 +1804,11 @@ TEST_CASE("an OrderType outside the enumerators is rejected, not executed", "[ph
     eng.set_sink(&sink);
     std::vector<Trade> out;
 
-    const OrderId id = eng.apply(NewOrder{.side = Side::Buy,
-                                          .type = static_cast<OrderType>(2),
-                                          .price = 100, .quantity = 10, .participant = 1}, out);
+    const auto id = eng.apply(NewOrder{.side = Side::Buy,
+                                       .type = static_cast<OrderType>(2),
+                                       .price = 100, .quantity = 10, .participant = 1}, out);
 
-    CHECK(id == Engine::kRejected);
+    CHECK(id.error() == RejectReason::MalformedOrder);   // the reason, not a sentinel
     CHECK(out.empty());
     CHECK(eng.book().resting_count() == 0);
     CHECK(eng.pool().in_use() == 0);
@@ -1824,8 +1826,8 @@ TEST_CASE("a Side outside the enumerators is rejected", "[phase7][audit]") {
     Engine             eng(kMin, kMax, 64);
     std::vector<Trade> out;
     CHECK(eng.apply(NewOrder{.side = static_cast<Side>(7), .type = OrderType::Limit,
-                             .price = 100, .quantity = 10, .participant = 1}, out)
-          == Engine::kRejected);
+                             .price = 100, .quantity = 10, .participant = 1}, out).error()
+          == RejectReason::MalformedOrder);
     CHECK(eng.book().resting_count() == 0);
 }
 
@@ -1839,10 +1841,10 @@ TEST_CASE("a quantity above the cap is rejected before it can wrap a level total
 
     REQUIRE(eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit, .price = 100,
                                .quantity = kMaxQuantity, .participant = 1}, out)
-            != Engine::kRejected);
+            .has_value());
     CHECK(eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit, .price = 100,
-                             .quantity = kMaxQuantity + 1, .participant = 1}, out)
-          == Engine::kRejected);
+                             .quantity = kMaxQuantity + 1, .participant = 1}, out).error()
+          == RejectReason::InvalidQuantity);
 
     CHECK(eng.book().depth_at(100) == kMaxQuantity);   // exact, not wrapped
     REQUIRE(eng.check_invariants());
@@ -1857,14 +1859,14 @@ TEST_CASE("a marketable limit still trades when the pool is exhausted", "[phase7
     std::vector<Trade> out;
 
     REQUIRE(eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit, .price = 100,
-                               .quantity = 5, .participant = 1}, out) != Engine::kRejected);
+                               .quantity = 5, .participant = 1}, out).has_value());
     REQUIRE(eng.pool().in_use() == 1);          // pool is now full
 
     out.clear();
-    const OrderId taker = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                             .price = 100, .quantity = 5, .participant = 2}, out);
+    const auto taker = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                          .price = 100, .quantity = 5, .participant = 2}, out);
 
-    CHECK(taker != Engine::kRejected);          // was kRejected before the fix
+    CHECK(taker.has_value());                   // traded, not refused with PoolExhausted
     REQUIRE(out.size() == 1);
     CHECK(out[0].quantity == 5);
     CHECK(eng.book().resting_count() == 0);
@@ -1883,14 +1885,14 @@ TEST_CASE("a remainder rests on a slot its own fill freed", "[phase7][audit]") {
     std::vector<Trade> out;
 
     REQUIRE(eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit, .price = 100,
-                               .quantity = 3, .participant = 1}, out) != Engine::kRejected);
+                               .quantity = 3, .participant = 1}, out).has_value());
     REQUIRE(eng.pool().in_use() == 1);
 
     out.clear();
-    const OrderId taker = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
-                                             .price = 100, .quantity = 5, .participant = 2}, out);
+    const auto taker = eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit,
+                                          .price = 100, .quantity = 5, .participant = 2}, out);
 
-    REQUIRE(taker != Engine::kRejected);
+    REQUIRE(taker.has_value());
     REQUIRE(out.size() == 1);
     CHECK(out[0].quantity == 3);
     CHECK(eng.book().resting_count() == 1);          // the remainder rested
@@ -1908,18 +1910,18 @@ TEST_CASE("a fully filled limit returns the slot it reserved", "[phase7][audit]"
     // explicitly, so it also comes back to the pool if fill() throws.
     Engine             eng(kMin, kMax, 8);
     std::vector<Trade> out;
-    eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit, .price = 100,
+    (void)eng.apply(NewOrder{.side = Side::Sell, .type = OrderType::Limit, .price = 100,
                        .quantity = 4, .participant = 1}, out);
     const std::size_t before = eng.pool().in_use();
     out.clear();
-    eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit, .price = 100,
+    (void)eng.apply(NewOrder{.side = Side::Buy, .type = OrderType::Limit, .price = 100,
                        .quantity = 4, .participant = 2}, out);
     CHECK(eng.pool().in_use() == before - 1);        // maker's freed, taker's returned
     CHECK(eng.pool().free_list_is_consistent());
 }
 
 TEST_CASE("the book refuses id 0 rather than corrupting its index", "[phase7][audit]") {
-    // IdIndex uses id 0 as its EMPTY marker and Engine::kRejected is also 0.
+    // IdIndex uses id 0 as its EMPTY marker, and Engine never issues id 0.
     // add() checks the id unconditionally, as it does the price: under NDEBUG an id-0
     // order would be written into a slot that still reads as empty, is never consumed,
     // and still increments count_.
@@ -1979,7 +1981,7 @@ TEST_CASE("conservation_holds_after_every_operation", "[phase7][fuzz]") {
     for (std::size_t i = 0; i < cmds.size(); ++i) {
         INFO("after operation " << i);
         scratch.clear();
-        if (const auto* n = std::get_if<NewOrder>(&cmds[i])) eng.apply(*n, scratch);
+        if (const auto* n = std::get_if<NewOrder>(&cmds[i])) (void)eng.apply(*n, scratch);
         else                                                 eng.apply(*std::get_if<Cancel>(&cmds[i]));
 
         const auto c = props::check_conservation(sink.events(), eng.book());
@@ -2084,7 +2086,7 @@ TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") 
     std::vector<Trade>    scratch;
     for (std::size_t i = 0; i < cmds.size(); ++i) {
         scratch.clear();
-        if (const auto* n = std::get_if<NewOrder>(&cmds[i])) eng.apply(*n, scratch);
+        if (const auto* n = std::get_if<NewOrder>(&cmds[i])) (void)eng.apply(*n, scratch);
         else                                                 eng.apply(*std::get_if<Cancel>(&cmds[i]));
         if ((i + 1) % kInvariantEvery == 0) {
             INFO("invariants broke by operation " << i);

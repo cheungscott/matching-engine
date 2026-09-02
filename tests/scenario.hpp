@@ -81,7 +81,7 @@ inline std::string run(const std::vector<Command>& cmds, Price min_price, Price 
     for (const Command& c : cmds) {
         scratch.clear();
         if (const auto* n = std::get_if<NewOrder>(&c)) {
-            eng.apply(*n, scratch);
+            (void)eng.apply(*n, scratch);
         } else {
             eng.apply(*std::get_if<Cancel>(&c));
         }

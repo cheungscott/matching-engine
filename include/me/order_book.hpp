@@ -60,7 +60,7 @@ public:
         }
         // The same rule, applied to the id. IdIndex uses id 0 as its EMPTY marker, and
         // Engine never issues 0, so under NDEBUG a Slot{0, node} would be written and still
-        // later. IdIndex uses id 0 as its EMPTY marker (as does Engine::kRejected), so
+        // read as empty: the order unremovable, its pool slot leaked, and count_ incremented
         // anyway, drifting past the load factor the probe loops depend on.
         if (o->id == 0) {
             throw std::invalid_argument("OrderBook::add: id 0 is reserved");

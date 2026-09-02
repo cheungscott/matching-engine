@@ -13,6 +13,7 @@
 
 #include <cassert>
 #include <cstddef>
+#include <expected>
 #include <optional>
 #include <vector>
 
@@ -38,10 +39,6 @@ struct Cancel {
 
 class Engine {
 public:
-    // 0 is never a valid order id, so it doubles as "rejected". A later change replaces
-    // this with std::expected<OrderId, RejectReason>, which g++ 11 lacks.
-    static constexpr OrderId kRejected = 0;
-
     // The index is sized from the pool, exactly: an order that cannot be pooled
     // cannot rest, so `pool_capacity` is a hard bound on live index entries and
     // the index never needs to grow.
@@ -49,11 +46,12 @@ public:
         : book_(min_price, max_price, pool_capacity), pool_(pool_capacity) {}
 
     // Match what crosses, rest what remains. Trades are appended to `out`.
-    // Returns the engine-assigned id, or kRejected.
-    OrderId apply(const NewOrder& cmd, std::vector<Trade>& out) {
+    // Yields the engine-assigned id, or the reason it was refused.
+    [[nodiscard]] std::expected<OrderId, RejectReason> apply(const NewOrder& cmd,
+                                                            std::vector<Trade>& out) {
         if (const auto why = validate(cmd); why.has_value()) {
             emit(OrderRejected{.seq = next_seq_++, .reason = *why});
-            return kRejected;
+            return std::unexpected(*why);
         }
 
         // A limit order reserves its slot BEFORE it is accepted.
@@ -80,7 +78,7 @@ public:
             slot = pool_.acquire();
             if (slot == nullptr && !can_match(cmd)) {
                 emit(OrderRejected{.seq = next_seq_++, .reason = RejectReason::PoolExhausted});
-                return kRejected;           // no id burned: it never existed
+                return std::unexpected(RejectReason::PoolExhausted);   // no id burned
             }
         }
 
@@ -337,7 +335,7 @@ private:
         Order*             slot_;
     };
 
-    OrderId           next_id_  = 1;    // 0 reserved for kRejected
+    OrderId           next_id_  = 1;    // 0 is never issued; IdIndex uses it as EMPTY
     EventSink*        sink_     = nullptr;
 };
 
