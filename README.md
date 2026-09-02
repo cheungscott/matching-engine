@@ -77,7 +77,11 @@ the hot path".
   queue position, which is what makes cancel O(1) once the index finds it.
 - **Pre-allocated pool** — the allocator's worst case is unbounded, and unbounded
   is what disqualifies it, not slow.
-- **id → node index** — a cancel message carries only an id. Without the index,
+- **id → node index**, hashed by scattering 64-slot *blocks* rather than by identity.
+  Identity hashing put every live entry in one contiguous run, and linear probing stops
+  at the first empty slot, so a lookup landing inside that run walked to the end of it —
+  241 µs for a single cancel at 320,000 resting orders, growing linearly with depth
+  (D28). A cancel message carries only an id. Without the index,
   finding the order is a scan, and cancels dominate real message traffic. The lookup
   and the unlink are both O(1); a cancel that *empties the best level* additionally
   advances the cursor over the occupancy bitmap at O(range/64), so "O(1) cancel"
@@ -89,8 +93,8 @@ the hot path".
 ## Verification
 
 ```
-Default suite     87 cases, 152,949 assertions          ~2.7 s
-Fuzz gate         1.1M operations, 758,717 assertions   6m21 s
+Default suite     88 cases, 152,953 assertions          ~2.7 s
+Fuzz gate         1.1M operations, 758,717 assertions   6m22 s
 ```
 
 Both run under **AddressSanitizer and UndefinedBehaviorSanitizer**.
@@ -175,13 +179,13 @@ latency distribution is a number nobody experiences.
 
 | Operation | p99.9 | p99 | (p50) |
 |---|---|---|---|
-| all | 476 ns | 212 ns | 45 ns |
-| add, rested | 267 ns | 113 ns | 39 ns |
-| add, traded | 352 ns | 175 ns | 60 ns |
-| cancel, hit | 623 ns | 466 ns | 120 ns |
-| cancel, unknown | 461 ns | 280 ns | 40 ns |
+| all | 436 ns | 183 ns | 47 ns |
+| add, rested | 350 ns | 130 ns | 41 ns |
+| add, traded | 362 ns | 181 ns | 63 ns |
+| cancel, hit | 558 ns | 285 ns | 110 ns |
+| cancel, unknown | 452 ns | 141 ns | 50 ns |
 
-Throughput: **24-30 M ops/sec** across three invocations.
+Throughput: **26 M ops/sec** (20-27 across three invocations).
 
 The `max` column is gone on purpose. It was a *median of five per-run maxima*, which is
 not a maximum of anything and quietly discards the worst observation. The binary still
@@ -244,6 +248,40 @@ lookup is only about 8 comparisons, so calling it a complexity win would be over
 ```bash
 cmake --build build-bench --target bench_baseline -j && ./build-bench/bench_baseline
 ```
+
+### What the hardware counters say
+
+`tools/perf-pass.sh` regenerates this. 200,000 resting orders, 200,000 measured
+operations, median of 3, with a fill-only baseline subtracted.
+
+| mode | cycles | instructions | IPC | cache misses | branch misses |
+|---|---|---|---|---|---|
+| rest | 117 | 249 | 2.13 | 3.0 | 0.005 |
+| trade | 105 | 239 | 2.28 | 0.5 | 0.009 |
+| **cancel** | **722** | **363** | **0.50** | **13.2** | **1.24** |
+| cancel, miss | 21 | 60 | 2.82 | 1.2 | ~0 |
+
+**Cancel is memory-bound and nothing else is.** IPC 0.50 against 2.1-2.8 elsewhere, on
+*fewer* than 400 instructions — it is not doing more work, it is waiting. Thirteen cache
+misses from a pointer chase that is inherent to the design: find the node through the
+index, touch its predecessor and successor to unlink it, then the pool's free list, then
+possibly the occupancy bitmap. Each is a separate line that nothing warmed. That is the
+one place where a v1.5 optimisation has a measured case behind it rather than an
+argument, and it is deliberately not being done here.
+
+**Branch prediction is a non-issue** — 0.005 to 0.009 misses per operation on the add and
+trade paths. The `<=` versus `<` crossing logic and the side dispatch cost essentially
+nothing, so any proposal to make this code branchless should be refused unless it comes
+with a counter that contradicts this.
+
+Environment limits, because they bound what can be concluded: `L1-dcache-*` and `LLC-*`
+are **not exposed under WSL2**, so `cache-references`/`cache-misses` are the whole cache
+picture and the level at which they miss is unknown.
+
+This pass found a defect on its first run — an O(resting-orders) lookup in the id index,
+241 µs for a single cancel at 320,000 orders, reachable from the public API. See D28. The
+argument that the design was safe had been read by three audits and checked by none of
+them; running the code checked it.
 
 The benchmarks **refuse to run** if built with a sanitizer or without `NDEBUG`, and
 `bench_latency` and `bench_profile` additionally **abort rather than report** if the
