@@ -13,6 +13,7 @@
 // because a specific `return false` had otherwise never been observed to fire.
 #pragma once
 
+#include "me/id_index.hpp"
 #include "me/object_pool.hpp"
 #include "me/order_book.hpp"
 #include "me/price_level.hpp"
@@ -30,6 +31,19 @@ struct Probe {
     }
 
     static void bump_index_count(OrderBook& b) noexcept { ++b.by_id_.count_; }
+
+    // D28. How many slots a lookup for `id` has to walk. Counted rather than timed,
+    // so the clustering property can be pinned by a deterministic assertion instead
+    // of a stopwatch. Identity hashing made this O(live entries); it must not return.
+    static std::size_t probe_length(const IdIndex& idx, OrderId id) noexcept {
+        std::size_t i = idx.home(id);
+        std::size_t n = 0;
+        for (; n < idx.table_.size(); ++n, i = (i + 1) & idx.mask_) {
+            if (idx.table_[i].id == IdIndex::kEmpty) break;
+            if (idx.table_[i].id == id)              break;
+        }
+        return n;
+    }
 
     static PriceLevel& level_at(OrderBook& b, Price p) noexcept {
         return b.levels_[b.index_of(p)];
