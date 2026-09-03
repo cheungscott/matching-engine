@@ -64,7 +64,7 @@ jobs:
       matrix:
         compiler: [g++-12, g++-13]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Both compilers installed explicitly. NEVER rely on the runner image default: it
       # changes without notice, which would silently move the floor this job exists to test.
@@ -77,7 +77,7 @@ jobs:
       # Bench is not. A key that omitted either could serve a Catch2 compiled with different
       # flags and produce a green run that means nothing (D30, sub-decision e).
       - name: Cache Catch2
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/_deps
           key: deps-debug-${{ matrix.compiler }}-${{ hashFiles('CMakeLists.txt') }}
@@ -114,13 +114,13 @@ jobs:
       matrix:
         compiler: [g++-12, g++-13]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
         run: sudo apt-get update && sudo apt-get install -y ninja-build ${{ matrix.compiler }}
 
       - name: Cache Catch2
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/_deps
           key: deps-debug-${{ matrix.compiler }}-${{ hashFiles('CMakeLists.txt') }}
@@ -155,7 +155,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
         run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12
@@ -163,7 +163,7 @@ jobs:
       # Separate path AND a "bench" key: the Bench build is unsanitized, so its Catch2 must
       # never be confused with the Debug jobs' sanitized one.
       - name: Cache Catch2
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build-bench/_deps
           key: deps-bench-g++-12-${{ hashFiles('CMakeLists.txt') }}
