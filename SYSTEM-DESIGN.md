@@ -1871,6 +1871,127 @@ up naming the compiler floor, consolidate instead of adding.
 
 ---
 
+### D32 - The benchmark pass refuses to run on a loaded machine
+
+On 2026-09-03 the benchmark was re-run against a freshly configured `build-bench` (Ninja,
+g++-12) and came back **worse than canonical**: median p50 54 ns against 49, median p99.9
+548 ns against ~465, median throughput 20.4 M ops/sec against ~23.5, with one invocation at
+p50 103 ns, p99.9 1010 ns and 12.48 M ops/sec - roughly half speed.
+
+None of it was recorded, because the machine was not idle. `/proc/loadavg` read **0.92 at the
+start and 0.93 at the end**, against the 0.00 the canonical figures were taken at. A process
+snapshot found `snapfuse` at 69% CPU, `snapd` at 18%, and a cluster of systemd units with
+one-to-three second elapsed times - a WSL distro that had just booted - alongside a busy
+Windows host.
+
+**This is the second time.** The file already records an intermediate re-measurement that
+declared the published tail irreproducible, taken while the same machine was compiling and
+running the ASan fuzz gate. It was wrong; the correction was the range, not a different number.
+Twice is a process defect, not bad luck.
+
+The tell was in the data both times. The **first** invocation that day, taken at load 0.27
+before the batch, returned p50 **50**, p99.9 **487**, **21.17 M ops/sec** - every one inside the
+canonical band. The batch degraded only as load climbed. That is interference, not a regression.
+
+**Decision: `tools/bench-pass.sh`, which refuses to run above a load threshold, runs N
+invocations, reports min/max/median with n, and re-checks the load afterwards - failing the run
+if it drifted.**
+
+This is `tools/perf-pass.sh`'s argument applied to latency. That file exists because numbers
+"quoted from a terminal nobody still has open" are not evidence. The same holds for numbers
+quoted from a terminal nobody checked the load average of.
+
+#### Why refuse rather than warn
+
+D17 already established the principle for this rig: the benchmark binaries **refuse to run**
+under a sanitizer or without `NDEBUG`, rather than printing a caveat, because *a wrong number
+should take effort to produce*. A warning printed above a table of numbers is a warning nobody
+reads - the numbers get copied and the caveat does not travel with them. Refusal is the only
+form that survives being quoted.
+
+The override is deliberately awkward: `ME_BENCH_FORCE=1`, and when set the banner is stamped
+into the output so a forced number cannot be mistaken for a clean one.
+
+#### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| **Keep running it by hand** | The status quo, and it is what produced the contaminated batch above. The failure is not that anyone was careless; it is that nothing in the loop asked about load. |
+| Warn instead of refuse | See above. This is settled by D17, not re-argued here. |
+| Have the script compare against canonical and pass/fail | Tempting, and it is a performance gate on an unpinned virtual machine - the exact thing D30 refused to put in CI, for the exact reason it would flap. The script reports; the human judges. |
+| `taskset` to a pinned core | Not achievable meaningfully from inside a WSL2 guest, as the rig's own environment caveat says. Worth revisiting only on real hardware. |
+| Guard on something better than load average | There is something better - `/proc/pressure` (PSI) gives actual stall time rather than a runnable-count average. Rejected for now only because loadavg is universally available and this needs to be simple. **Recorded as the obvious upgrade.** |
+
+#### What it costs
+
+1. **A threshold is a magic number.** Set at `0.20` on the one-minute average. Too strict and the
+   script never runs on a normal desktop; too loose and it does not protect. `0.20` is an
+   informed guess anchored to the 0.00 the canonical run had, not a measured optimum, and it is
+   overridable per-run via `ME_BENCH_MAX_LOAD`. If it turns out to block clean machines
+   routinely, raise it - do not start forcing.
+2. **Load average lags.** It is a one-minute exponential average, so it can read clean and then
+   degrade mid-run - which is very close to what happened here (0.27 rising to 0.92). Hence the
+   *post*-run check, which is the half that would actually have caught today, and which fails
+   the run rather than mentioning it.
+3. **A fourth file naming build assumptions.** It reads the compiler and generator out of
+   `build-bench/CMakeCache.txt` rather than hardcoding them, which keeps it honest, but it is
+   one more thing to keep in step - the same drift surface D31 cost (3) records.
+
+#### The guard was tested by planting a violation per branch, and that found a real defect
+
+D27 recorded that the invariant checkers had been trusted rather than tested, and that a large
+share of them could not fail. Adding a new guard without testing it would repeat exactly that.
+So each branch of `bench-pass.sh` was given a deliberate violation, with the assertion naming
+*which* branch was expected to fire.
+
+**It found one branch that could never fire.** The binary-exists check ran *before* the
+build-type check, so pointing the script at the Debug tree always tripped "no benchmark binary"
+- a Debug build produces no bench targets at all - and the "not a Bench build" message was
+unreachable in the only situation anyone would hit it. Fixed by identifying the tree first and
+complaining about its contents second: no `CMakeCache.txt`, then wrong build type, then missing
+binary. Three distinct messages, all now reachable.
+
+**It also found a bad test, which is worth recording separately.** The first attempt planted the
+load violation with `ME_BENCH_MAX_LOAD=0`, and it did not fire - because the machine genuinely
+read `0.00`, and `0.00 > 0` is false. The guard was correct; the *plant* was non-deterministic,
+passing or failing on ambient load. Changed to `-1`, which no load average can sit below. A
+flaky plant is worse than no plant: it would eventually go green by accident and be believed.
+
+Eight plants, eight fired: no-cmake-dir, wrong-build-type, missing-binary, pre-run-refuse,
+force-stamp, post-run-drift, and the two happy-path assertions.
+
+#### A corroborating measurement, explicitly NOT a new canonical figure
+
+The happy-path plants each ran two invocations on the by-then settled machine:
+
+| | p50 ns | p99.9 ns | M ops/sec |
+|---|---|---|---|
+| first pair | 47 to 48 | 440 to 459 | 23.40 to 25.35 |
+| second pair | 48 to 49 | 448 to 479 | 22.90 to 24.16 |
+| canonical (n=10) | 49 | 429 to 518 | 20.9 to 26.1 |
+
+Every value sits inside the canonical band. **This is corroboration, not a measurement** - n=2
+twice, on a machine that merely settled rather than one verified idle, and this file's own rule
+is a band with a run count from ten invocations. It is recorded because it is evidence on the
+question the contaminated batch raised, and the answer is that **g++-12 with Ninja shows no
+regression**; the earlier bad numbers were the load, exactly as the first uncontaminated
+invocation suggested.
+
+The real pass still needs running: `tools/bench-pass.sh` on a machine idle enough to clear the
+guard at both ends.
+
+#### What would falsify this
+
+If `ME_BENCH_FORCE=1` becomes routine, the guard has become theatre and this entry is void -
+the same disease D27 found in assertions that could not fail, and D30 named for a gate that gets
+skipped to go green. The correct response to a guard that keeps firing is to fix the machine or
+move the threshold **on purpose and in writing**, never to force past it habitually.
+
+**Revisit trigger:** if the pass ever runs on real, non-virtualised hardware, both the threshold
+and the `taskset` question reopen, and PSI becomes worth the complexity.
+
+---
+
 ## Open questions (from the Blueprint's critique — decide as you reach them)
 - Best-price cursor advance: linear scan vs occupancy-bitmap + `countr_zero`? (§3.2)
 - Cancel/replace on amend: keep the old order id or mint a fresh one? (§5.5)
