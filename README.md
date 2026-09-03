@@ -1,6 +1,6 @@
 # Matching Engine
 
-[![ci](https://github.com/cheungscott/matching-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/cheungscott/matching-engine/actions/workflows/ci.yml)
+[![ci](https://github.com/cheungscott/matching-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cheungscott/matching-engine/actions/workflows/ci.yml)
 
 A single-symbol **matching engine** in **C++23**: it takes orders, applies
 price-time priority, and emits a sequenced event stream.
