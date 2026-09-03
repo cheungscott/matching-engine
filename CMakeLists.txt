@@ -7,10 +7,22 @@
 #   TSan    -O1 -g  + TSan         reserved for concurrent code. Cannot coexist with ASan.
 #   Bench   -O2/-O3, NO sanitizers the ONLY build allowed to produce a latency number
 #
-#   cmake -S . -B build       -G Ninja -DCMAKE_BUILD_TYPE=Debug
-#   cmake -S . -B build-tsan  -G Ninja -DCMAKE_BUILD_TYPE=TSan
-#   cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Bench
-#   cmake --build build && ctest --test-dir build --output-on-failure
+# Two of the three are named presets. CMakePresets.json carries the generator, the build
+# type and the COMPILER together, so none of them can be forgotten independently -
+# the compiler in particular, since the g++ 12 floor below is above what Ubuntu 22.04
+# defaults to. `cmake --list-presets` lists them. Ninja and g++-12 are prerequisites.
+#
+#   cmake --preset debug          Debug -> build/          the everyday build
+#   cmake --preset bench          Bench -> build-bench/     measurement only
+#   cmake --preset debug-g++-13   Debug -> build-g++-13/    same configure as the g++-13 CI job
+#
+#   cmake --build --preset debug && ctest --preset all      everything, gate included
+#   ctest --preset fast                                     the edit loop, gate excluded
+#
+# TSan has NO preset, deliberately: the engine is single-threaded until the v1.5 ring
+# lands, so TSan cannot fail yet. The same reason keeps it out of CI. By hand:
+#
+#   cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=TSan -DCMAKE_CXX_COMPILER=g++-12
 #
 # NOTE: MinGW ships no libasan and no libtsan, and TSan has never been ported to
 # Windows by any vendor. Sanitized builds require WSL/Linux.
