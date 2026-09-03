@@ -82,10 +82,12 @@ jobs:
           path: build/_deps
           key: deps-debug-${{ matrix.compiler }}-${{ hashFiles('CMakeLists.txt') }}
 
+      # -DCMAKE_CXX_COMPILER, not the CXX env var: this is the exact form the project's own
+      # configure-time guard prescribes when it refuses a too-old compiler, so local and CI
+      # invocations stay identical. (Confirmed live on 2026-09-03: a plain configure picks up
+      # the system c++ 11.4 and the guard fires.)
       - name: Configure
-        env:
-          CXX: ${{ matrix.compiler }}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
 
       - name: Build
         run: cmake --build build -j
@@ -123,10 +125,12 @@ jobs:
           path: build/_deps
           key: deps-debug-${{ matrix.compiler }}-${{ hashFiles('CMakeLists.txt') }}
 
+      # -DCMAKE_CXX_COMPILER, not the CXX env var: this is the exact form the project's own
+      # configure-time guard prescribes when it refuses a too-old compiler, so local and CI
+      # invocations stay identical. (Confirmed live on 2026-09-03: a plain configure picks up
+      # the system c++ 11.4 and the guard fires.)
       - name: Configure
-        env:
-          CXX: ${{ matrix.compiler }}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
 
       - name: Build
         run: cmake --build build -j
@@ -165,9 +169,7 @@ jobs:
           key: deps-bench-g++-12-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Configure
-        env:
-          CXX: g++-12
-        run: cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Bench
+        run: cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Bench -DCMAKE_CXX_COMPILER=g++-12
 
       - name: Build benchmarks (not run)
         run: cmake --build build-bench --target bench_latency bench_profile bench_baseline -j
