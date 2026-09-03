@@ -1732,6 +1732,37 @@ local can run a GitHub runner. If the `ubuntu-24.04` label is stale, or either g
 missing from that image, or a restored cache misbehaves, **the first run is where it surfaces**.
 That first run is the verification step, not this entry.
 
+#### Outcome of the first run (2026-09-03, same day)
+
+The entry above said the first run on GitHub was the verification step, not the entry. That run
+has happened and **the caveat is discharged: every job executed and passed, and nothing needed
+fixing.** `ubuntu-24.04` resolved, both compilers installed from apt (g++-12 out of `universe`,
+the one residual risk that was flagged), the caches behaved, and the fast/full split worked as
+designed - `gate` correctly sat out the branch push and correctly ran on the pull request.
+
+| Job | Result |
+|---|---|
+| `test (g++-12)` | pass, 1m03s |
+| `test (g++-13)` | pass, 1m17s |
+| `gate (g++-12)` | pass, 8m54s |
+| `gate (g++-13)` | pass, 6m05s |
+| `bench targets compile` | pass, 32s |
+
+**The g++-13 gate is genuinely new information.** The million-operation property run, the 100k
+differential with the seven invariants, and the shrinker had never executed on that compiler
+anywhere, because the development machine cannot supply it. That is the matrix doing the single
+thing it was built to do, on its first outing. It is also the only part of this run that was not
+already known from local testing.
+
+**Not to be over-read:** 8m54s against 6m05s between the two gate jobs is two samples on shared,
+unpinned hardware. That is runner variance, not a compiler comparison, and this file's own rule
+about single points applies with full force.
+
+**One warning, not a failure:** `actions/checkout@v4` and `actions/cache@v4` target Node.js 20,
+which is deprecated; GitHub forces them onto Node 24. Bumped in the same PR - to checkout v7 and
+cache v6, which are three and two majors ahead respectively, so the bump was made ON the branch
+and verified by this same workflow rather than assumed to be a drop-in.
+
 #### Housekeeping flag, noticed while writing this
 
 **There are two entries numbered D28** - "The perf pass, and the unbounded lookup it found in the
