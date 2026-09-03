@@ -33,6 +33,10 @@ name: ci
 on:
   push:
   pull_request:
+  # Manual "Run workflow" button. Note it only appears once this file is on the DEFAULT
+  # branch - it cannot be used to test the very first run. Its use is on-demand gate runs
+  # later, since `gate` fires on anything that is not a push.
+  workflow_dispatch:
   schedule:
     # Nightly. Offset from the top of the hour on purpose: GitHub queues a large share of
     # all scheduled jobs at :00, and runs there start late.
