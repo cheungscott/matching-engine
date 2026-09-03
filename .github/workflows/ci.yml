@@ -50,9 +50,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
-      fail-fast: false   # a g++-12 failure must not hide the g++-13 result, and vice versa
+      fail-fast: false   # one compiler failing must not hide what the others would have said
       matrix:
-        compiler: [g++-12, g++-13]
+        compiler: [g++-12, g++-13, g++-14]
     steps:
       - uses: actions/checkout@v7
 
@@ -102,7 +102,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [g++-12, g++-13]
+        compiler: [g++-12, g++-13, g++-14]
     steps:
       - uses: actions/checkout@v7
 
