@@ -7,6 +7,14 @@
 #   (2) prove the suite passes on a machine that is not Scott's, and (3) be visible evidence.
 #   It is deliberately NOT a performance gate - see the `bench` job.
 #
+#   The matrix runs 12, 13 and 14. 12 is the FLOOR and is the point: it is what the guard in
+#   CMakeLists.txt refuses below, and what the development machine builds with, so it is
+#   exercised continuously rather than only here. 13 and 14 are the CEILING - newer
+#   diagnostics and, on the `gate` job, newer ASan/UBSan implementations that catch
+#   undefined behaviour older ones miss. Raising the FLOOR to 13 was considered and
+#   rejected: nothing in the codebase needs it, and Ubuntu 22.04 - the development
+#   machine - has no g++-13 candidate at all. See D30.
+#
 # Deliberately absent, each for a stated reason in D30:
 #   - TSan. The engine is single-threaded by design (D6), so TSan can find nothing today.
 #     Add it when the SPSC ring lands in v1.5 and it starts being load-bearing.
@@ -60,9 +68,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
-      fail-fast: false   # a g++-12 failure must not hide the g++-13 result, and vice versa
+      fail-fast: false   # one compiler failing must not hide what the others would have said
       matrix:
-        compiler: [g++-12, g++-13]
+        compiler: [g++-12, g++-13, g++-14]
     steps:
       - uses: actions/checkout@v7
 
@@ -112,7 +120,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [g++-12, g++-13]
+        compiler: [g++-12, g++-13, g++-14]
     steps:
       - uses: actions/checkout@v7
 

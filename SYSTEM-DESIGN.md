@@ -1763,6 +1763,41 @@ which is deprecated; GitHub forces them onto Node 24. Bumped in the same PR - to
 cache v6, which are three and two majors ahead respectively, so the bump was made ON the branch
 and verified by this same workflow rather than assumed to be a drop-in.
 
+#### Amendment: g++-14 added to the matrix (2026-09-03)
+
+Sub-decision (c) named g++-12 and g++-13. **g++-14 joins them** (present in noble as 14.2.0,
+`universe`). The distinction the original entry did not draw clearly:
+
+- **g++-12 is the FLOOR.** It is what `CMakeLists.txt` refuses below and what the development
+  machine builds with, so it is exercised continuously rather than only in CI.
+- **13 and 14 are the CEILING.** They buy newer diagnostics and - on the `gate` job, which is
+  the one that matters - newer ASan and UBSan implementations. Sanitizers gain checks each
+  release, so a newer one catches undefined behaviour that gcc 12's misses. For a project whose
+  sanitizer coverage is a load-bearing claim, that is the substantive gain; the extra compile
+  check is the lesser half.
+
+**Raising the FLOOR to 13 was considered and rejected.** It would buy nothing: the only C++23
+library features in use are `std::to_underlying` and `std::expected`, both libstdc++ 12. And it
+would cost the ability to build on Ubuntu 22.04, which is the development machine and has no
+g++-13 candidate at all. **A floor is a compatibility statement, not an aspiration** - it belongs
+as low as the code allows, and moves only when a wanted feature requires it, which is exactly
+what D28 did going 11 to 12.
+
+**Building locally on the floor rather than on the newest is also deliberate**, and is the subtle
+half. Developing on 13 while the floor is 12 lets a 13-only library feature slip in unnoticed:
+the local build stays green and the floor is silently broken, with CI the only thing standing
+between that and a false claim. Building on the floor means it is exercised by hand continuously,
+and CI *confirms* the claim rather than solely defending it.
+
+**Pinning to "latest" was never on the table.** A moving compiler target is a moving build -
+the same failure the pinned runner image avoids.
+
+**Logged as a candidate, not done: clang.** A second frontend catches a different class of
+problem than any additional GCC version does, and clang's ASan/UBSan are the reference
+implementations. It is not a one-line matrix addition: `-Wall -Wextra -Wconversion` behave
+differently enough that it would surface a batch of legitimate warnings to triage. Worth its own
+entry when taken on.
+
 #### Housekeeping flag, noticed while writing this
 
 **There are two entries numbered D28** - "The perf pass, and the unbounded lookup it found in the
