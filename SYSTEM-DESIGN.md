@@ -1687,6 +1687,51 @@ not defect detection. Claiming otherwise would be the same self-flattery D21 rec
 concurrency bugs become possible, and when CI stops being mostly evidential and starts earning its
 keep as a defect gate.
 
+#### Amendment on implementation (2026-09-03, same day)
+
+The entry above asked to be checked against what actually shipped. `.github/workflows/ci.yml`
+diverges from it in three places, all recorded here rather than by quietly editing the decision.
+
+**1. `ctest -LE gate`, not `-E gate`.** Sub-decision (b) named the wrong flag. `-E` is a
+**name** regex; `-LE` is a **label** exclusion. The gate is registered with
+`set_tests_properties(phase7_gate PROPERTIES LABELS "gate")`, and `-LE gate` is the opt-out
+this file's own CMakeLists comment already documents. `-E gate` happens to work today only
+because the test's *name* also contains the substring - so it would silently exclude any
+future test named `..._gate_...` that was never meant to be skipped. The correct flag was
+already in the repo; the decision entry simply misquoted it.
+
+**2. The runner image is pinned to `ubuntu-24.04`, not `ubuntu-latest`.** Sub-decision (c)
+pinned the compilers but left the image floating, which is the same mistake one level up:
+`latest` is a moving alias, and an image bump could change which gcc versions apt can offer at
+all. This stopped being hypothetical during implementation - **the development machine runs
+Ubuntu 22.04, whose repositories carry g++-12 but have no g++-13 candidate.** So the matrix
+this workflow exists to run cannot be reproduced locally, which is simultaneously the strongest
+argument for it and the reason its environment must be pinned rather than inherited.
+
+**3. `-Werror` was considered and rejected; D30 never raised it.** The build already sets
+`-Wall -Wextra -Wconversion` (deliberately after `FetchContent`, so it warns on our code and not
+Catch2's). Promoting those to errors is a change to the project's build policy, not a CI
+decision, and making it silently inside a workflow file would be exactly the kind of drift this
+log exists to prevent. Left as a warning. If it is ever wanted, it belongs in `CMakeLists.txt`
+under its own entry.
+
+#### What was verified before committing, and what was not
+
+**Verified by execution:**
+- The YAML parses, and defines the three jobs intended.
+- **The label exclusion does what is claimed.** Against the real test list on this machine:
+  `ctest --test-dir build -N` reports **90 tests** with `phase7_gate` as #90;
+  `ctest --test-dir build -N -LE gate` reports **89**, and `phase7_gate` is the one dropped.
+- Local toolchain inventory: Ubuntu 22.04.5, default `g++` is 11, `g++-12` installed (12.3.0),
+  `g++-13` has no apt candidate, **`ninja` is not installed at all** - even though the
+  CMakeLists header and README both document `-G Ninja`. The documented invocation therefore
+  does not currently run on the machine it was written on. Not fixed here; noted.
+
+**NOT verified - and this is the honest limit:** the workflow has never been executed. Nothing
+local can run a GitHub runner. If the `ubuntu-24.04` label is stale, or either g++ package is
+missing from that image, or a restored cache misbehaves, **the first run is where it surfaces**.
+That first run is the verification step, not this entry.
+
 #### Housekeeping flag, noticed while writing this
 
 **There are two entries numbered D28** - "The perf pass, and the unbounded lookup it found in the

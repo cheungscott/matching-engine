@@ -1,0 +1,169 @@
+# Continuous integration. The reasoning for every choice here is D30 in SYSTEM-DESIGN.md,
+# written before this file existed; read that first if you are wondering why something is
+# absent. The short version:
+#
+#   This repo is solo, so CI catches almost no defect a local run would not. It exists to
+#   (1) MECHANICALLY ENFORCE the g++ 12 compiler floor that D28 introduced and D20 defined,
+#   (2) prove the suite passes on a machine that is not Scott's, and (3) be visible evidence.
+#   It is deliberately NOT a performance gate - see the `bench` job.
+#
+# Deliberately absent, each for a stated reason in D30:
+#   - TSan. The engine is single-threaded by design (D6), so TSan can find nothing today.
+#     Add it when the SPSC ring lands in v1.5 and it starts being load-bearing.
+#   - Any assertion about benchmark NUMBERS. Runners are shared, unpinned and noisy; a p99.9
+#     threshold would flap red on unrelated load, and a flapping alert trains you to ignore it.
+#   - Release artifacts / deploys. Nothing consumes this as a binary.
+#   - -Werror. The build already sets -Wall -Wextra -Wconversion; promoting those to errors
+#     is a change to the project's build policy, not a CI decision, and D30 did not make it.
+#
+# THE RUNNER IMAGE IS PINNED to ubuntu-24.04 rather than ubuntu-latest, for exactly the reason
+# the compilers are installed by name: `latest` is a moving target, and a silent image bump
+# could change which gcc versions apt can even offer. That is not hypothetical here - the
+# development machine runs Ubuntu 22.04, whose repositories carry g++-12 but NOT g++-13, so
+# the matrix below cannot be reproduced locally at all. Which is most of the point of it.
+#
+# FIRST RUN IS THE VERIFICATION STEP. This file has been checked for YAML validity and the
+# `-LE gate` exclusion was confirmed against the real test list (90 tests, 89 with the label
+# excluded, phase7_gate the one dropped). What has NOT been executed anywhere is the job
+# itself: if the `ubuntu-24.04` label or either g++ package is unavailable, the first run is
+# where that surfaces. Fix it there rather than assuming it works.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Nightly. Offset from the top of the hour on purpose: GitHub queues a large share of
+    # all scheduled jobs at :00, and runs there start late.
+    - cron: '17 3 * * *'
+
+concurrency:
+  # Three pushes in a row otherwise queue three full runs against superseded code.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # The fast loop. Runs on every push. Everything EXCEPT the Phase 7 gate.
+  #
+  # `-LE gate` is a LABEL exclusion, matching the opt-out the CMakeLists and README already
+  # document. Not `-E gate`, which is a name regex: it happens to match `phase7_gate` today,
+  # but would silently also exclude any future test whose NAME contains "gate".
+  # ---------------------------------------------------------------------------------------
+  test:
+    name: test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false   # a g++-12 failure must not hide the g++-13 result, and vice versa
+      matrix:
+        compiler: [g++-12, g++-13]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both compilers installed explicitly. NEVER rely on the runner image default: it
+      # changes without notice, which would silently move the floor this job exists to test.
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build ${{ matrix.compiler }}
+
+      # Catch2 arrives via FetchContent, so a cold runner re-clones and rebuilds it every run.
+      # THE COMPILER AND BUILD TYPE ARE BOTH IN THE KEY, and this is not cosmetic: `_deps`
+      # holds Catch2's BUILD as well as its source, and the Debug build is sanitized while
+      # Bench is not. A key that omitted either could serve a Catch2 compiled with different
+      # flags and produce a green run that means nothing (D30, sub-decision e).
+      - name: Cache Catch2
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-debug-${{ matrix.compiler }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test (gate excluded)
+        run: ctest --test-dir build --output-on-failure -LE gate
+
+  # ---------------------------------------------------------------------------------------
+  # The Phase 7 gate: the million-operation property run, the 100k differential with the
+  # seven invariants, and the shrinker. ~6m22s under the sanitizers.
+  #
+  # NOT on push, on purpose. Six minutes is long enough that you stop watching your own CI,
+  # and an ignored signal is worse than no signal. It still runs before anything merges and
+  # every night, so it is never skipped - only moved off the edit loop. This is the one
+  # tradeoff in the file that is about attention rather than cost (runs here are free).
+  # ---------------------------------------------------------------------------------------
+  gate:
+    name: gate (${{ matrix.compiler }})
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60   # the ctest TIMEOUT on phase7_gate is 2400s; this bounds the job around it
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++-12, g++-13]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build ${{ matrix.compiler }}
+
+      - name: Cache Catch2
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-debug-${{ matrix.compiler }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build -j
+
+      # The full suite, gate included. This is the command the README documents.
+      - name: Test (everything)
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------------------
+  # The bench targets are COMPILED and never run.
+  #
+  # They only exist under -DCMAKE_BUILD_TYPE=Bench, which builds no tests, so nothing else
+  # in this file touches them - and bench/*.cpp is where the rdtscp timing and the NaiveBook
+  # adapter live, which is exactly the code that bit-rots unnoticed. Compiling it is the
+  # cheap half of the value.
+  #
+  # Running it would be the expensive, worthless half: see the header. One compiler is
+  # enough here - g++-12 is the floor, and code that compiles at the floor compiles above it.
+  # ---------------------------------------------------------------------------------------
+  bench:
+    name: bench targets compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12
+
+      # Separate path AND a "bench" key: the Bench build is unsanitized, so its Catch2 must
+      # never be confused with the Debug jobs' sanitized one.
+      - name: Cache Catch2
+        uses: actions/cache@v4
+        with:
+          path: build-bench/_deps
+          key: deps-bench-g++-12-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        env:
+          CXX: g++-12
+        run: cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Bench
+
+      - name: Build benchmarks (not run)
+        run: cmake --build build-bench --target bench_latency bench_profile bench_baseline -j
