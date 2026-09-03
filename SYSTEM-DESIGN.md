@@ -1742,6 +1742,69 @@ pending.
 
 ---
 
+### D31 - The compiler floor is selected by a preset, not by the build system or the machine
+
+D28 moved the compiler floor to g++ 12 and added a configure-time guard that refuses anything
+older with the fix in its message. That guard works - it fired on the development machine on
+2026-09-03, where the system `c++` is 11.4 and `g++-12` is installed alongside it. But every
+correct invocation of this project now has to carry `-DCMAKE_CXX_COMPILER=g++-12` by hand, and
+a flag you have to remember is a flag you will eventually forget.
+
+**Decision: add `CMakePresets.json` defining named configure, build and test presets that carry
+the generator, the build type and the compiler.** `cmake --preset debug` replaces the full
+incantation.
+
+#### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| **Set `CMAKE_CXX_COMPILER` in `CMakeLists.txt`** before `project()` | The obvious move and the wrong one. It would hardcode one compiler at one path into the build system: the CI matrix could no longer vary the compiler, which is the entire reason D30 built it; anyone without g++-12 at `/usr/bin/g++-12` gets a hard failure instead of the guard's actionable message; and clang or a newer gcc becomes unusable without editing the file. **The build system should state a floor and refuse below it, which it already does. It should not choose.** |
+| `update-alternatives` to make gcc-12 the system default | Fixes every project on the machine with no flags anywhere, and is reversible. Rejected because it is **invisible machine state**: a fresh clone on any other box hits the identical error, so the project is no more portable than before, and every unrelated project on the machine silently moves off gcc 11. It solves the symptom on one computer. |
+| `export CXX=g++-12` in the shell profile | Same objection at a smaller blast radius, plus CMake caches the compiler per build directory on first configure, so the variable's effect is sticky and easy to misattribute later. |
+| Leave it, and keep typing the flag | The status quo. It is not wrong - the guard makes the failure mode loud rather than silent. Rejected on ergonomics alone, which is a weaker reason than most entries in this file rest on, and worth admitting as such. |
+| Add a `tsan` preset too | **Deliberately not done.** The TSan build type exists, but the engine is single-threaded by design (D6) so TSan can find nothing today - the same reasoning that kept it out of CI in D30. Add the preset in v1.5 alongside the SPSC ring, when it starts being able to fail. |
+
+#### Shape
+
+Configure presets are named for the build type they select and pin generator, type and compiler
+together, because those three are what actually have to agree. `debug` and `bench` use the same
+`build/` and `build-bench/` binary directories the README already documents, so nothing else in
+the documentation goes stale. A second `debug-g++-13` mirrors the CI matrix so a CI-only failure
+can be reproduced by name rather than reconstructed.
+
+Test presets carry the split D30 made: `fast` excludes the `gate` label, `all` excludes nothing.
+That puts the fast/full distinction in one committed place instead of in a flag that has already
+been misquoted once in this log.
+
+#### What it costs
+
+1. **Ninja becomes a hard prerequisite**, where before it was only documented. `cmake --preset
+   debug` fails outright without it. That is arguably a fix - the CMakeLists header and README
+   have documented `-G Ninja` all along on a machine that never had it installed - but it is a
+   new way for a first run to fail.
+2. **Existing build directories were configured with Make and will reject a Ninja preset**, since
+   CMake refuses to change generator in place. `build/` can be deleted freely; `build-bench*/`
+   hold binaries behind published numbers and should be renamed rather than removed.
+3. **A second place that names `g++-12`.** The floor is now asserted in `CMakeLists.txt` (as a
+   refusal), in `.github/workflows/ci.yml` (as a matrix), and in `CMakePresets.json` (as a
+   default). Three files must agree. They express different things - refuse, test, prefer - so
+   this is not pure duplication, but it is a drift surface and is recorded as one.
+4. **`debug-g++-13` cannot run on the development machine at all** (Ubuntu 22.04 has no g++-13
+   candidate). It exists for CI parity and will fail locally with a compiler-not-found error,
+   which is honest but will look like a broken preset to anyone who tries it cold.
+
+#### What would falsify this
+
+If the three files naming the floor ever disagree - the guard says one version, CI tests another,
+the preset prefers a third - the duplication in cost (3) has stopped being expressive and become
+a bug. At that point the floor wants a single source, most likely a variable in `CMakeLists.txt`
+that CI and the presets both read.
+
+**Revisit trigger:** v1.5. The `tsan` preset lands with the SPSC ring, and if a fourth file ends
+up naming the compiler floor, consolidate instead of adding.
+
+---
+
 ## Open questions (from the Blueprint's critique — decide as you reach them)
 - Best-price cursor advance: linear scan vs occupancy-bitmap + `countr_zero`? (§3.2)
 - Cancel/replace on amend: keep the old order id or mint a fresh one? (§5.5)

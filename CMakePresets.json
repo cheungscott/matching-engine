@@ -1,0 +1,67 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug (ASan + UBSan, g++-12)",
+      "description": "The verification build. Sanitized per D4. g++-12 is the floor D28 set: the system c++ on Ubuntu 22.04 is 11.4 and cannot build std::expected. Reasoning in SYSTEM-DESIGN.md D31.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++-12"
+      }
+    },
+    {
+      "name": "debug-g++-13",
+      "displayName": "Debug on g++-13 (mirrors the CI matrix)",
+      "description": "Exists so a CI-only failure can be reproduced by name. Ubuntu 22.04 has no g++-13 candidate, so this WILL fail on that machine with a compiler-not-found error. That is expected, not a broken preset.",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build-g++-13",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++-13"
+      }
+    },
+    {
+      "name": "bench",
+      "displayName": "Bench (-O2 -DNDEBUG, no sanitizers, no tests)",
+      "description": "Measurement only. The binaries refuse to run under a sanitizer or with assertions enabled (D17), so a wrong number cannot be produced by accident from either direction.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-bench",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Bench",
+        "CMAKE_CXX_COMPILER": "g++-12"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "debug-g++-13", "configurePreset": "debug-g++-13" },
+    {
+      "name": "bench",
+      "configurePreset": "bench",
+      "targets": ["bench_latency", "bench_profile", "bench_baseline"]
+    }
+  ],
+
+  "testPresets": [
+    {
+      "name": "fast",
+      "displayName": "Everything except the Phase 7 gate",
+      "description": "The edit loop. Excludes the `gate` LABEL, which is the opt-out CMakeLists.txt documents - not a name regex, which would also swallow any future test merely named *_gate_*.",
+      "configurePreset": "debug",
+      "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "gate" } }
+    },
+    {
+      "name": "all",
+      "displayName": "Everything, gate included (~6m22s under sanitizers)",
+      "description": "What CI runs on pull requests and nightly, and what must pass before tagging.",
+      "configurePreset": "debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
