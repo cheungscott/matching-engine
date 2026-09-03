@@ -1942,7 +1942,15 @@ into the output so a forced number cannot be mistaken for a clean one.
 D27 recorded that the invariant checkers had been trusted rather than tested, and that a large
 share of them could not fail. Adding a new guard without testing it would repeat exactly that.
 So each branch of `bench-pass.sh` was given a deliberate violation, with the assertion naming
-*which* branch was expected to fire.
+*which* branch was expected to fire. That harness is committed as
+`tools/bench-pass-selftest.sh` rather than left in a scratch directory - a check nobody can
+re-run is the same failure this entry is about. It builds its own synthetic trees under
+`mktemp -d` so it does not depend on which build directories happen to exist, and it treats an
+unrunnable happy path as a FAILURE rather than a quiet skip: a self-test reporting success
+having never exercised the success path is precisely the defect it exists to catch.
+**It was itself meta-tested**, per D16: pointed at the Debug tree, four of its branches fail and
+it exits non-zero, so a green run is not merely the harness printing PASS. It is not wired into
+`ctest` - it drives a shell tool, not the engine, and CI runs neither.
 
 **It found one branch that could never fire.** The binary-exists check ran *before* the
 build-type check, so pointing the script at the Debug tree always tripped "no benchmark binary"
