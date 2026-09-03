@@ -1593,6 +1593,110 @@ there is no measured cost to remove, and it would trade a line anyone can read f
 
 ---
 
+### D30 - Continuous integration: what it is for here, and what it is deliberately not for
+
+> **Written BEFORE implementation (2026-09-03), on purpose.** Every prior entry in this file is a
+> retrospective. This one is a commitment made in advance, so that when it is built the record can
+> be checked against it rather than written to flatter it - the failure mode D21 and D24 are both
+> about. If the workflow that ships differs from this, amend the entry and say why.
+
+The repository has **no CI at all** - there is no `.github/` directory. Every claim it makes is
+therefore true only of one machine: "ASan clean", "the suite is green", "it builds under g++ 12",
+and the entire measurement story. `tools/perf-pass.sh` was written because numbers "quoted from a
+terminal nobody still has open" are not evidence. That argument applies with equal force to the
+build, and has not been applied to it.
+
+**Decision: add GitHub Actions running the Debug (ASan + UBSan) build and `ctest` on a clean Ubuntu
+runner, across a two-compiler matrix.**
+
+#### What it is for, in order of actual value
+
+1. **Enforcing the C++23 compiler floor.** This is the reason that justifies the rest. D28 moved
+   the floor to g++ 12 for `std::expected`, and D20 established what "C++23" means here. Today that
+   floor lives in a `CMakeLists.txt` configure check and in prose. A matrix building on **g++-12 and
+   g++-13** makes it a property the machine enforces: add a feature needing g++ 14 and it goes red.
+   This is the single claim in the project that has been re-litigated most, so it is the one worth
+   mechanising.
+2. **Portability of the correctness claim.** A fresh runner has no WSL2 quirks, no stale
+   `build-bench11/`, no locally-installed toolchain. "Passes on a machine that is not mine" is a
+   strictly stronger statement than the one currently on offer.
+3. **Evidence.** The repo is public and linked from the CV. A green badge is the cheapest
+   conversion of existing work into a visible signal available.
+
+Point 3 is real and should be stated rather than dressed up as engineering. On a **solo repository
+with no collaborators, CI catches almost no defects you would not catch anyway**, because you
+already run the full gate locally before tagging. Its value here is evidential and reproducibility,
+not defect detection. Claiming otherwise would be the same self-flattery D21 recorded.
+
+#### The six sub-decisions
+
+| # | Decision | Reasoning |
+|---|---|---|
+| a | **Debug build type only. No TSan.** | Debug is the type carrying ASan and UBSan per D4. TSan looks for data races; the engine is single-threaded by design per D6, so TSan can find nothing today. Running it would be coverage theatre. **Add it when the SPSC ring lands in v1.5** - it becomes load-bearing at exactly that moment and not before. |
+| b | **Split fast and full: `ctest -E gate` on every push, full `ctest` on PR + nightly.** | The Phase 7 gate is **6m22s** under sanitizers (758,717 assertions). The README makes it non-skippable locally on purpose, and that stays. But six minutes is long enough that you stop watching, and an ignored signal is worse than none. The split buys a seconds-long loop without ever letting the gate go unrun. |
+| c | **Matrix on g++-12 and g++-13; install both explicitly.** | See above. **Do not rely on the runner image's default gcc** - it changes without notice, which would silently move the floor being tested. Pinning is the entire point of the job. |
+| d | **Build the bench targets; assert nothing about their numbers.** | Runners are shared, virtualised, unpinned and noisy. A p99.9 threshold would flap red on load unrelated to the code, and a flapping alert trains you to ignore it. Compilation is checked; measurement stays on a controlled machine and is quoted as a **band**, per D21 and D29. |
+| e | **Cache the `_deps` directory, keyed on compiler + `hashFiles('CMakeLists.txt')`.** | Catch2 arrives via `FetchContent` and a cold runner rebuilds it every run. **The compiler must be in the cache key** - without it a stale entry can serve a Catch2 built by a different compiler and produce a green run that means nothing. That is the classic CI footgun and it is worth naming here rather than discovering it. |
+| f | **`concurrency` group with `cancel-in-progress`.** | Three pushes in a row otherwise queue three full runs against code already superseded. |
+
+#### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| **No CI - keep running the gate locally before tagging** | The honest baseline, and it is not obviously wrong: on a solo repo it catches nearly the same defects for zero maintenance. It is rejected only because it cannot make the compiler-floor claim mechanically, and cannot make any claim portable off one machine. If (a) and (2) above stop mattering, this option becomes correct again. |
+| Run the full `ctest` including the gate on every push | Simplest possible config, and free on a public repo. Rejected on **feedback latency**, not cost: 6m22s per push is where people stop reading their own CI. |
+| Single compiler (`g++-12` only) | Halves the runs, and proves the floor holds - but not that anything *above* it still works. The matrix is the cheap half of the value. |
+| Gate on benchmark regression (fail if p99.9 exceeds a threshold) | Tempting, and wrong for this environment. See (d). Would produce exactly the flattering-or-flapping numbers D21 and D24 are about. |
+| Self-hosted runner on a pinned machine, so benchmarks *could* be gated | The only way to make benchmark CI meaningful. Rejected as far beyond the value: it means maintaining a machine, and the measurement discipline already documented is sufficient. Revisit only if the engine acquires users who depend on its latency. |
+| Add a deploy or release-artifact step | Nothing consumes this as a binary. Pure surface, no consumer. |
+
+#### What it costs - the tradeoffs, stated plainly
+
+1. **A new failure surface that is not the engine.** CI breaks for apt mirror flakiness, a runner
+   image bumping its defaults, a deprecated action version. Each is a red X on a commit that is
+   fine, and each costs time spent on the pipeline instead of on the code.
+2. **Red-badge decay is the real risk, and it is worse than no CI.** A permanently-red badge on a
+   public repo linked from a CV is a negative signal shown to exactly the audience the badge was
+   added for. This is the failure mode to watch.
+3. **It does not validate any performance claim, and cannot.** The numbers come from WSL2; a runner
+   is a different virtualised environment. CI proves "builds and passes clean", which is worth
+   having, and nothing at all about latency. Two environments now exist and neither is a pinned
+   machine - a mild increase in "which environment was that?" ambiguity, which this project has
+   already been burned by twice.
+4. **Sanitizer wall-clock grows with the suite.** 6m22s today. The TSan build in v1.5 adds another.
+   The split in (b) mitigates but adds config to maintain.
+5. **The matrix multiplies flake surface.** Two compilers times two job types is four runs per push.
+   Free, but four chances for an unrelated failure instead of one.
+6. **Opportunity cost, and it is the one that actually matters.** An afternoon on CI is an afternoon
+   not spent on interview preparation, and the internship research is explicit that the gate at
+   Big Tech interns is the online assessment, not the CV. CI is worth doing because the engine wants
+   it anyway. It is **not** worth doing as an application tactic, and must not delay a submission.
+
+#### What would falsify this decision
+
+- **If after one month the badge has been red more often than green for reasons unrelated to the
+  engine**, the pipeline costs more than it returns. Delete it rather than nurse it. A deleted
+  workflow is a clean state; a nursed one is a tax.
+- **If the gate ever gets skipped, narrowed or `-E`'d out of the full job to make a run go green**,
+  it has become theatre and the entry above is void. That is the same disease D27 found in the
+  assertions: a check that cannot fail is not a check.
+- If a second contributor ever appears, points 1-3 of "what it is for" reorder and defect detection
+  becomes the primary value. Re-read this entry then; it was written for a solo repo.
+
+**Revisit trigger:** v1.5, when the SPSC ring buffer lands. That is when TSan becomes real, when
+concurrency bugs become possible, and when CI stops being mostly evidential and starts earning its
+keep as a defect gate.
+
+#### Housekeeping flag, noticed while writing this
+
+**There are two entries numbered D28** - "The perf pass, and the unbounded lookup it found in the
+structure built to remove one" and "The reject path returns the reason, not a sentinel (v1.5)".
+Not corrected here, because renumbering would break every reference to D28 elsewhere in the repo.
+Recorded so the collision is known rather than discovered later. This entry is D30; there is no D31
+pending.
+
+---
+
 ## Open questions (from the Blueprint's critique — decide as you reach them)
 - Best-price cursor advance: linear scan vs occupancy-bitmap + `countr_zero`? (§3.2)
 - Cancel/replace on amend: keep the old order id or mint a fresh one? (§5.5)
