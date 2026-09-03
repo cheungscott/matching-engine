@@ -1,5 +1,7 @@
 # Matching Engine
 
+[![ci](https://github.com/cheungscott/matching-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cheungscott/matching-engine/actions/workflows/ci.yml)
+
 A single-symbol **matching engine** in **C++23**: it takes orders, applies
 price-time priority, and emits a sequenced event stream.
 
@@ -308,7 +310,7 @@ Add is a flat ~3-4x — a locality win, not a complexity one. At ~200 price leve
 lookup is only about 8 comparisons, so calling it a complexity win would be overreach.
 
 ```bash
-cmake --build build-bench --target bench_baseline -j && ./build-bench/bench_baseline
+cmake --build --preset bench --target bench_baseline && ./build-bench/bench_baseline
 ```
 
 ### What the hardware counters say
@@ -355,10 +357,22 @@ take effort to produce.
 Sanitized builds require Linux or WSL — MinGW ships no `libasan`, and TSan has
 never been ported to Windows by any vendor.
 
+Two prerequisites. The presets pin **Ninja** as the generator, and `std::expected` on
+the reject path (D28) puts the compiler floor at **g++ 12** — above the 11.4 that
+Ubuntu 22.04 still defaults to, so a plain configure is refused rather than allowed to
+fail later as template errors.
+
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+sudo apt-get install -y ninja-build g++-12
+```
+
+`CMakePresets.json` carries the generator, build type and compiler together, so none of
+them can be forgotten independently (D31). `cmake --list-presets` shows what is available.
+
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset all
 ```
 
 `ctest` runs **everything, including the fuzz gate**, which takes several minutes under
@@ -366,10 +380,10 @@ the sanitizers. That is deliberate: the gate used to be invisible to `ctest` bec
 Catch2 does not enumerate hidden tests, so the documented command gave a green run with
 the entire Phase 7 gate omitted. The safe thing should happen unless you opt out.
 
-For the fast edit loop, opt out by label:
+For the fast edit loop, opt out by label — which is what the `fast` preset is:
 
 ```bash
-ctest --test-dir build -LE gate
+ctest --preset fast
 ```
 
 The gate can also be run directly:
@@ -381,8 +395,8 @@ The gate can also be run directly:
 Benchmarks build only under the `Bench` configuration:
 
 ```bash
-cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Bench
-cmake --build build-bench --target bench_latency -j
+cmake --preset bench
+cmake --build --preset bench
 ./build-bench/bench_latency
 ```
 

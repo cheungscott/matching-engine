@@ -1593,6 +1593,284 @@ there is no measured cost to remove, and it would trade a line anyone can read f
 
 ---
 
+### D30 - Continuous integration: what it is for here, and what it is deliberately not for
+
+> **Written BEFORE implementation (2026-09-03), on purpose.** Every prior entry in this file is a
+> retrospective. This one is a commitment made in advance, so that when it is built the record can
+> be checked against it rather than written to flatter it - the failure mode D21 and D24 are both
+> about. If the workflow that ships differs from this, amend the entry and say why.
+
+The repository has **no CI at all** - there is no `.github/` directory. Every claim it makes is
+therefore true only of one machine: "ASan clean", "the suite is green", "it builds under g++ 12",
+and the entire measurement story. `tools/perf-pass.sh` was written because numbers "quoted from a
+terminal nobody still has open" are not evidence. That argument applies with equal force to the
+build, and has not been applied to it.
+
+**Decision: add GitHub Actions running the Debug (ASan + UBSan) build and `ctest` on a clean Ubuntu
+runner, across a two-compiler matrix.**
+
+#### What it is for, in order of actual value
+
+1. **Enforcing the C++23 compiler floor.** This is the reason that justifies the rest. D28 moved
+   the floor to g++ 12 for `std::expected`, and D20 established what "C++23" means here. Today that
+   floor lives in a `CMakeLists.txt` configure check and in prose. A matrix building on **g++-12 and
+   g++-13** makes it a property the machine enforces: add a feature needing g++ 14 and it goes red.
+   This is the single claim in the project that has been re-litigated most, so it is the one worth
+   mechanising.
+2. **Portability of the correctness claim.** A fresh runner has no WSL2 quirks, no stale
+   `build-bench11/`, no locally-installed toolchain. "Passes on a machine that is not mine" is a
+   strictly stronger statement than the one currently on offer.
+3. **Evidence.** The repo is public and linked from the CV. A green badge is the cheapest
+   conversion of existing work into a visible signal available.
+
+Point 3 is real and should be stated rather than dressed up as engineering. On a **solo repository
+with no collaborators, CI catches almost no defects you would not catch anyway**, because you
+already run the full gate locally before tagging. Its value here is evidential and reproducibility,
+not defect detection. Claiming otherwise would be the same self-flattery D21 recorded.
+
+#### The six sub-decisions
+
+| # | Decision | Reasoning |
+|---|---|---|
+| a | **Debug build type only. No TSan.** | Debug is the type carrying ASan and UBSan per D4. TSan looks for data races; the engine is single-threaded by design per D6, so TSan can find nothing today. Running it would be coverage theatre. **Add it when the SPSC ring lands in v1.5** - it becomes load-bearing at exactly that moment and not before. |
+| b | **Split fast and full: `ctest -E gate` on every push, full `ctest` on PR + nightly.** | The Phase 7 gate is **6m22s** under sanitizers (758,717 assertions). The README makes it non-skippable locally on purpose, and that stays. But six minutes is long enough that you stop watching, and an ignored signal is worse than none. The split buys a seconds-long loop without ever letting the gate go unrun. |
+| c | **Matrix on g++-12 and g++-13; install both explicitly.** | See above. **Do not rely on the runner image's default gcc** - it changes without notice, which would silently move the floor being tested. Pinning is the entire point of the job. |
+| d | **Build the bench targets; assert nothing about their numbers.** | Runners are shared, virtualised, unpinned and noisy. A p99.9 threshold would flap red on load unrelated to the code, and a flapping alert trains you to ignore it. Compilation is checked; measurement stays on a controlled machine and is quoted as a **band**, per D21 and D29. |
+| e | **Cache the `_deps` directory, keyed on compiler + `hashFiles('CMakeLists.txt')`.** | Catch2 arrives via `FetchContent` and a cold runner rebuilds it every run. **The compiler must be in the cache key** - without it a stale entry can serve a Catch2 built by a different compiler and produce a green run that means nothing. That is the classic CI footgun and it is worth naming here rather than discovering it. |
+| f | **`concurrency` group with `cancel-in-progress`.** | Three pushes in a row otherwise queue three full runs against code already superseded. |
+
+#### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| **No CI - keep running the gate locally before tagging** | The honest baseline, and it is not obviously wrong: on a solo repo it catches nearly the same defects for zero maintenance. It is rejected only because it cannot make the compiler-floor claim mechanically, and cannot make any claim portable off one machine. If (a) and (2) above stop mattering, this option becomes correct again. |
+| Run the full `ctest` including the gate on every push | Simplest possible config, and free on a public repo. Rejected on **feedback latency**, not cost: 6m22s per push is where people stop reading their own CI. |
+| Single compiler (`g++-12` only) | Halves the runs, and proves the floor holds - but not that anything *above* it still works. The matrix is the cheap half of the value. |
+| Gate on benchmark regression (fail if p99.9 exceeds a threshold) | Tempting, and wrong for this environment. See (d). Would produce exactly the flattering-or-flapping numbers D21 and D24 are about. |
+| Self-hosted runner on a pinned machine, so benchmarks *could* be gated | The only way to make benchmark CI meaningful. Rejected as far beyond the value: it means maintaining a machine, and the measurement discipline already documented is sufficient. Revisit only if the engine acquires users who depend on its latency. |
+| Add a deploy or release-artifact step | Nothing consumes this as a binary. Pure surface, no consumer. |
+
+#### What it costs - the tradeoffs, stated plainly
+
+1. **A new failure surface that is not the engine.** CI breaks for apt mirror flakiness, a runner
+   image bumping its defaults, a deprecated action version. Each is a red X on a commit that is
+   fine, and each costs time spent on the pipeline instead of on the code.
+2. **Red-badge decay is the real risk, and it is worse than no CI.** A permanently-red badge on a
+   public repo linked from a CV is a negative signal shown to exactly the audience the badge was
+   added for. This is the failure mode to watch.
+3. **It does not validate any performance claim, and cannot.** The numbers come from WSL2; a runner
+   is a different virtualised environment. CI proves "builds and passes clean", which is worth
+   having, and nothing at all about latency. Two environments now exist and neither is a pinned
+   machine - a mild increase in "which environment was that?" ambiguity, which this project has
+   already been burned by twice.
+4. **Sanitizer wall-clock grows with the suite.** 6m22s today. The TSan build in v1.5 adds another.
+   The split in (b) mitigates but adds config to maintain.
+5. **The matrix multiplies flake surface.** Two compilers times two job types is four runs per push.
+   Free, but four chances for an unrelated failure instead of one.
+6. **Opportunity cost, and it is the one that actually matters.** An afternoon on CI is an afternoon
+   not spent on interview preparation, and the internship research is explicit that the gate at
+   Big Tech interns is the online assessment, not the CV. CI is worth doing because the engine wants
+   it anyway. It is **not** worth doing as an application tactic, and must not delay a submission.
+
+#### What would falsify this decision
+
+- **If after one month the badge has been red more often than green for reasons unrelated to the
+  engine**, the pipeline costs more than it returns. Delete it rather than nurse it. A deleted
+  workflow is a clean state; a nursed one is a tax.
+- **If the gate ever gets skipped, narrowed or `-E`'d out of the full job to make a run go green**,
+  it has become theatre and the entry above is void. That is the same disease D27 found in the
+  assertions: a check that cannot fail is not a check.
+- If a second contributor ever appears, points 1-3 of "what it is for" reorder and defect detection
+  becomes the primary value. Re-read this entry then; it was written for a solo repo.
+
+**Revisit trigger:** v1.5, when the SPSC ring buffer lands. That is when TSan becomes real, when
+concurrency bugs become possible, and when CI stops being mostly evidential and starts earning its
+keep as a defect gate.
+
+#### Amendment on implementation (2026-09-03, same day)
+
+The entry above asked to be checked against what actually shipped. `.github/workflows/ci.yml`
+diverges from it in three places, all recorded here rather than by quietly editing the decision.
+
+**1. `ctest -LE gate`, not `-E gate`.** Sub-decision (b) named the wrong flag. `-E` is a
+**name** regex; `-LE` is a **label** exclusion. The gate is registered with
+`set_tests_properties(phase7_gate PROPERTIES LABELS "gate")`, and `-LE gate` is the opt-out
+this file's own CMakeLists comment already documents. `-E gate` happens to work today only
+because the test's *name* also contains the substring - so it would silently exclude any
+future test named `..._gate_...` that was never meant to be skipped. The correct flag was
+already in the repo; the decision entry simply misquoted it.
+
+**2. The runner image is pinned to `ubuntu-24.04`, not `ubuntu-latest`.** Sub-decision (c)
+pinned the compilers but left the image floating, which is the same mistake one level up:
+`latest` is a moving alias, and an image bump could change which gcc versions apt can offer at
+all. This stopped being hypothetical during implementation - **the development machine runs
+Ubuntu 22.04, whose repositories carry g++-12 but have no g++-13 candidate.** So the matrix
+this workflow exists to run cannot be reproduced locally, which is simultaneously the strongest
+argument for it and the reason its environment must be pinned rather than inherited.
+
+**3. `-Werror` was considered and rejected; D30 never raised it.** The build already sets
+`-Wall -Wextra -Wconversion` (deliberately after `FetchContent`, so it warns on our code and not
+Catch2's). Promoting those to errors is a change to the project's build policy, not a CI
+decision, and making it silently inside a workflow file would be exactly the kind of drift this
+log exists to prevent. Left as a warning. If it is ever wanted, it belongs in `CMakeLists.txt`
+under its own entry.
+
+#### What was verified before committing, and what was not
+
+**Verified by execution:**
+- The YAML parses, and defines the three jobs intended.
+- **The label exclusion does what is claimed.** Against the real test list on this machine:
+  `ctest --test-dir build -N` reports **90 tests** with `phase7_gate` as #90;
+  `ctest --test-dir build -N -LE gate` reports **89**, and `phase7_gate` is the one dropped.
+- Local toolchain inventory: Ubuntu 22.04.5, default `g++` is 11, `g++-12` installed (12.3.0),
+  `g++-13` has no apt candidate, **`ninja` is not installed at all** - even though the
+  CMakeLists header and README both document `-G Ninja`. The documented invocation therefore
+  does not currently run on the machine it was written on. Not fixed here; noted.
+
+**NOT verified - and this is the honest limit:** the workflow has never been executed. Nothing
+local can run a GitHub runner. If the `ubuntu-24.04` label is stale, or either g++ package is
+missing from that image, or a restored cache misbehaves, **the first run is where it surfaces**.
+That first run is the verification step, not this entry.
+
+#### Outcome of the first run (2026-09-03, same day)
+
+The entry above said the first run on GitHub was the verification step, not the entry. That run
+has happened and **the caveat is discharged: every job executed and passed, and nothing needed
+fixing.** `ubuntu-24.04` resolved, both compilers installed from apt (g++-12 out of `universe`,
+the one residual risk that was flagged), the caches behaved, and the fast/full split worked as
+designed - `gate` correctly sat out the branch push and correctly ran on the pull request.
+
+| Job | Result |
+|---|---|
+| `test (g++-12)` | pass, 1m03s |
+| `test (g++-13)` | pass, 1m17s |
+| `gate (g++-12)` | pass, 8m54s |
+| `gate (g++-13)` | pass, 6m05s |
+| `bench targets compile` | pass, 32s |
+
+**The g++-13 gate is genuinely new information.** The million-operation property run, the 100k
+differential with the seven invariants, and the shrinker had never executed on that compiler
+anywhere, because the development machine cannot supply it. That is the matrix doing the single
+thing it was built to do, on its first outing. It is also the only part of this run that was not
+already known from local testing.
+
+**Not to be over-read:** 8m54s against 6m05s between the two gate jobs is two samples on shared,
+unpinned hardware. That is runner variance, not a compiler comparison, and this file's own rule
+about single points applies with full force.
+
+**One warning, not a failure:** `actions/checkout@v4` and `actions/cache@v4` target Node.js 20,
+which is deprecated; GitHub forces them onto Node 24. Bumped in the same PR - to checkout v7 and
+cache v6, which are three and two majors ahead respectively, so the bump was made ON the branch
+and verified by this same workflow rather than assumed to be a drop-in.
+
+#### Amendment: g++-14 added to the matrix (2026-09-03)
+
+Sub-decision (c) named g++-12 and g++-13. **g++-14 joins them** (present in noble as 14.2.0,
+`universe`). The distinction the original entry did not draw clearly:
+
+- **g++-12 is the FLOOR.** It is what `CMakeLists.txt` refuses below and what the development
+  machine builds with, so it is exercised continuously rather than only in CI.
+- **13 and 14 are the CEILING.** They buy newer diagnostics and - on the `gate` job, which is
+  the one that matters - newer ASan and UBSan implementations. Sanitizers gain checks each
+  release, so a newer one catches undefined behaviour that gcc 12's misses. For a project whose
+  sanitizer coverage is a load-bearing claim, that is the substantive gain; the extra compile
+  check is the lesser half.
+
+**Raising the FLOOR to 13 was considered and rejected.** It would buy nothing: the only C++23
+library features in use are `std::to_underlying` and `std::expected`, both libstdc++ 12. And it
+would cost the ability to build on Ubuntu 22.04, which is the development machine and has no
+g++-13 candidate at all. **A floor is a compatibility statement, not an aspiration** - it belongs
+as low as the code allows, and moves only when a wanted feature requires it, which is exactly
+what D28 did going 11 to 12.
+
+**Building locally on the floor rather than on the newest is also deliberate**, and is the subtle
+half. Developing on 13 while the floor is 12 lets a 13-only library feature slip in unnoticed:
+the local build stays green and the floor is silently broken, with CI the only thing standing
+between that and a false claim. Building on the floor means it is exercised by hand continuously,
+and CI *confirms* the claim rather than solely defending it.
+
+**Pinning to "latest" was never on the table.** A moving compiler target is a moving build -
+the same failure the pinned runner image avoids.
+
+**Logged as a candidate, not done: clang.** A second frontend catches a different class of
+problem than any additional GCC version does, and clang's ASan/UBSan are the reference
+implementations. It is not a one-line matrix addition: `-Wall -Wextra -Wconversion` behave
+differently enough that it would surface a batch of legitimate warnings to triage. Worth its own
+entry when taken on.
+
+#### Housekeeping flag, noticed while writing this
+
+**There are two entries numbered D28** - "The perf pass, and the unbounded lookup it found in the
+structure built to remove one" and "The reject path returns the reason, not a sentinel (v1.5)".
+Not corrected here, because renumbering would break every reference to D28 elsewhere in the repo.
+Recorded so the collision is known rather than discovered later. This entry is D30; there is no D31
+pending.
+
+---
+
+### D31 - The compiler floor is selected by a preset, not by the build system or the machine
+
+D28 moved the compiler floor to g++ 12 and added a configure-time guard that refuses anything
+older with the fix in its message. That guard works - it fired on the development machine on
+2026-09-03, where the system `c++` is 11.4 and `g++-12` is installed alongside it. But every
+correct invocation of this project now has to carry `-DCMAKE_CXX_COMPILER=g++-12` by hand, and
+a flag you have to remember is a flag you will eventually forget.
+
+**Decision: add `CMakePresets.json` defining named configure, build and test presets that carry
+the generator, the build type and the compiler.** `cmake --preset debug` replaces the full
+incantation.
+
+#### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| **Set `CMAKE_CXX_COMPILER` in `CMakeLists.txt`** before `project()` | The obvious move and the wrong one. It would hardcode one compiler at one path into the build system: the CI matrix could no longer vary the compiler, which is the entire reason D30 built it; anyone without g++-12 at `/usr/bin/g++-12` gets a hard failure instead of the guard's actionable message; and clang or a newer gcc becomes unusable without editing the file. **The build system should state a floor and refuse below it, which it already does. It should not choose.** |
+| `update-alternatives` to make gcc-12 the system default | Fixes every project on the machine with no flags anywhere, and is reversible. Rejected because it is **invisible machine state**: a fresh clone on any other box hits the identical error, so the project is no more portable than before, and every unrelated project on the machine silently moves off gcc 11. It solves the symptom on one computer. |
+| `export CXX=g++-12` in the shell profile | Same objection at a smaller blast radius, plus CMake caches the compiler per build directory on first configure, so the variable's effect is sticky and easy to misattribute later. |
+| Leave it, and keep typing the flag | The status quo. It is not wrong - the guard makes the failure mode loud rather than silent. Rejected on ergonomics alone, which is a weaker reason than most entries in this file rest on, and worth admitting as such. |
+| Add a `tsan` preset too | **Deliberately not done.** The TSan build type exists, but the engine is single-threaded by design (D6) so TSan can find nothing today - the same reasoning that kept it out of CI in D30. Add the preset in v1.5 alongside the SPSC ring, when it starts being able to fail. |
+
+#### Shape
+
+Configure presets are named for the build type they select and pin generator, type and compiler
+together, because those three are what actually have to agree. `debug` and `bench` use the same
+`build/` and `build-bench/` binary directories the README already documents, so nothing else in
+the documentation goes stale. A second `debug-g++-13` mirrors the CI matrix so a CI-only failure
+can be reproduced by name rather than reconstructed.
+
+Test presets carry the split D30 made: `fast` excludes the `gate` label, `all` excludes nothing.
+That puts the fast/full distinction in one committed place instead of in a flag that has already
+been misquoted once in this log.
+
+#### What it costs
+
+1. **Ninja becomes a hard prerequisite**, where before it was only documented. `cmake --preset
+   debug` fails outright without it. That is arguably a fix - the CMakeLists header and README
+   have documented `-G Ninja` all along on a machine that never had it installed - but it is a
+   new way for a first run to fail.
+2. **Existing build directories were configured with Make and will reject a Ninja preset**, since
+   CMake refuses to change generator in place. `build/` can be deleted freely; `build-bench*/`
+   hold binaries behind published numbers and should be renamed rather than removed.
+3. **A second place that names `g++-12`.** The floor is now asserted in `CMakeLists.txt` (as a
+   refusal), in `.github/workflows/ci.yml` (as a matrix), and in `CMakePresets.json` (as a
+   default). Three files must agree. They express different things - refuse, test, prefer - so
+   this is not pure duplication, but it is a drift surface and is recorded as one.
+4. **`debug-g++-13` cannot run on the development machine at all** (Ubuntu 22.04 has no g++-13
+   candidate). It exists for CI parity and will fail locally with a compiler-not-found error,
+   which is honest but will look like a broken preset to anyone who tries it cold.
+
+#### What would falsify this
+
+If the three files naming the floor ever disagree - the guard says one version, CI tests another,
+the preset prefers a third - the duplication in cost (3) has stopped being expressive and become
+a bug. At that point the floor wants a single source, most likely a variable in `CMakeLists.txt`
+that CI and the presets both read.
+
+**Revisit trigger:** v1.5. The `tsan` preset lands with the SPSC ring, and if a fourth file ends
+up naming the compiler floor, consolidate instead of adding.
+
+---
+
 ## Open questions (from the Blueprint's critique — decide as you reach them)
 - Best-price cursor advance: linear scan vs occupancy-bitmap + `countr_zero`? (§3.2)
 - Cancel/replace on amend: keep the old order id or mint a fresh one? (§5.5)
