@@ -184,8 +184,9 @@ the test, because a silently sampled check reads as a total one.
 > produces and are believable; **`max` is an upper bound on the environment, not
 > on the engine.**
 
-g++ 12.3, `-O2 -DNDEBUG`, no sanitizers, 5 runs × 200k operations, warm. (The
-figures below predate the g++-12 floor; see the compiler note under the re-measurement.)
+`-O2 -DNDEBUG`, no sanitizers, warm. The headline band below is the Ninja / g++-12 build;
+the per-operation split beneath it is the older g++ 12.3 Make measurement and is labelled as
+such.
 Per-operation timing via `rdtscp` + `lfence`; TSC rate measured, not assumed;
 timer floor ~10 ns. Percentiles are computed per run then medianed.
 
@@ -201,33 +202,88 @@ LOBSTER data has been ingested.**
 **p99.9 first, deliberately** — this is a latency system, and the mean of a
 latency distribution is a number nobody experiences.
 
-Measured 2026-09-02 on the shipped binary (g++ 12.3, post-D28 and post-F26), five
-invocations at load average 0.00. The tail is a band because it is a tail; the p50 is
-stable enough to be a figure.
+**Headline, measured 2026-09-06** via `tools/bench-pass.sh` on the Ninja / g++-12 build:
+ten invocations, each itself a median of five in-process runs, load 0.11 before and 0.17
+after against the 0.20 ceiling. The guard passed on its own and was never forced.
+
+| Metric | Range (n=10) | Median |
+|---|---|---|
+| `all` p50 | 46 to 46 ns | **46 ns** |
+| `all` p99.9 | 390 to 414 ns | **399 ns** |
+| Throughput | 25.48 to 26.63 M ops/sec | **26.375 M ops/sec** |
+
+Quote these as bands with the run count, never as single figures. The tail has been
+published wrongly twice, both times as a cherry-picked point estimate.
+
+**Throughput and latency come from different passes, and that is deliberate.** The timed
+loop carries two `rdtscp`+`lfence` pairs per operation and `lfence` serialises, so the
+instrument costs roughly half the throughput. Percentiles come from the instrumented pass;
+throughput from an uninstrumented pass over the same workload. The binary prints both,
+because the gap between them is the finding. Any figure pairing a p99.9 with a throughput
+number as though one run produced both is wrong.
+
+#### Per-operation breakdown — g++-11 / Make era, NOT re-measured since
+
+The 2026-09-06 pass reports the `all` aggregate and throughput only. The split below is from
+the earlier 2026-09-02 measurement (g++ 12.3, five invocations at load 0.00) and is kept
+because the shape is still informative — cancel-hit is the expensive path, and D29's counters
+say why. **Do not read these rows as current, and do not mix them with the headline band.**
 
 | Operation | p99.9 (median, range) | p99 | (p90) | (p50) |
 |---|---|---|---|---|
-| all | **454 ns** (429-518) | 212 ns | 112 ns | **49 ns** |
+| all | 454 ns (429-518) | 212 ns | 112 ns | 49 ns |
 | add, rested | 389 ns (368-429) | 137 ns | 53 ns | 42 ns |
 | add, traded | 398 ns (350-475) | 191 ns | 115 ns | 64 ns |
 | cancel, hit | 591 ns (519-793) | 438 ns | 207 ns | 136 ns |
 | cancel, unknown | 455 ns (440-491) | 276 ns | 111 ns | 60 ns |
 
-Throughput: **20.9-26.1 M ops/sec**, median ~23.5, over ten invocations across two idle
-sessions. `all` p99.9 over those same ten spans **429-518 ns**.
+That older aggregate row, 454 ns (429-518) at 20.9-26.1 M ops/sec, is the band this file
+published before 2026-09-06.
 
-The previous table, kept because the drift is the point: all 436 / 183 / 47, add-rested
+> [!warning] The headline band did not reproduce on 2026-09-10, and the guard cannot
+> explain why. Read this before quoting the numbers above.
+>
+> Two passes were run on the same machine, the same Ninja/g++-12 tree and the same binary
+> (unchanged since 2026-09-03; `ninja: no work to do`). Memory was not a factor: 6.9 GB free,
+> zero swap. `ME_BENCH_FORCE` was never set.
+>
+> | run | start load | p50 (n=10) | p99.9 (n=10) | M ops/sec (n=10) |
+> |---|---|---|---|---|
+> | 2026-09-10 #1 | 0.18 | 50-57 ns | 502-553 ns | 17.34-21.24 |
+> | 2026-09-10 #2 | 0.06 | 51-53 ns | 511-544 ns | 18.41-20.67 |
+>
+> Both failed the guard's post-check and are therefore formally discarded. But they agree
+> with each other, and run #2 is internally very tight — p50 spans 2 ns across ten
+> invocations — which is not what a randomly disturbed machine produces.
+>
+> **Two defects in the guard came out of this, and the second matters more than the numbers.**
+> First, the pass is single-threaded CPU work, so it raises the one-minute load average it
+> re-checks at the end; run #2 started at 0.06 and finished at 0.21 against a 0.20 ceiling, so
+> the guard is partly tripped by its own workload. Second, and structurally: `/proc/loadavg`
+> inside WSL2 reports the **guest only**. The hypervisor allocates CPU based on what the
+> Windows host is doing, and the guard cannot observe that at all. Every contamination story
+> in this file so far has been told in guest terms.
+>
+> That cuts both ways. The 2026-09-10 runs may be depressed by host load nobody measured —
+> and **the 2026-09-06 pass had exactly the same blind spot.** It passed a guard that could
+> not see the host either, so its band is not corroborated by anything except itself.
+>
+> Settling it needs a pass with the Windows host quiesced, which is the one variable never
+> yet controlled. Until then the headline band is the best available figure, not a settled one.
+
+An older table still, kept because the drift is the point: all 436 / 183 / 47, add-rested
 350 / 130 / 41, add-traded 362 / 181 / 63, cancel-hit 558 / 285 / 110, cancel-unknown
-452 / 141 / 50, and 26 M ops/sec. Those are point estimates near the optimistic end of
-the bands above, not errors.
+452 / 141 / 50, and 26 M ops/sec. Those are point estimates near the optimistic end of the
+**g++-11 / Make** bands, not errors. They are three measurements back; do not quote them.
 
 The `max` column is gone on purpose. It was a *median of five per-run maxima*, which is
 not a maximum of anything and quietly discards the worst observation. The binary still
 prints it, labelled `medmax`, and it ranges 9-69 µs across invocations — which is the
 hypervisor, and is why it is not quoted here.
 
-**Every figure here has been re-measured twice over, and the earlier ones did not
-survive either time.** `cancel, hit` p50 was published as 87 ns, corrected to 168, and
+**Every figure here has been re-measured repeatedly, and earlier ones keep not surviving.**
+The 2026-09-10 runs recorded in the warning above are the latest instance, and the first one
+that the load guard could not account for. `cancel, hit` p50 was published as 87 ns, corrected to 168, and
 is 120 on a quiet machine. Throughput was published as 12.9 M, corrected to 10.2 M,
 and is 24-30 M.
 
