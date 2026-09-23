@@ -448,6 +448,19 @@ The gate can also be run directly:
 ./build/phase1_tests "[gate]"
 ```
 
+The gate's two search tests - the million-operation property run and the 100k differential -
+use seeded input streams so failures can be replayed. With `ME_FUZZ_SEED` unset, they reproduce
+the recorded streams exactly. CI rotates the seed each run to search new input instead of
+repeating a fixed suite (D33):
+
+```bash
+ME_FUZZ_SEED=2026-09-06 ./build/phase1_tests "[gate]"
+```
+
+Any label works - a run id, a date, a SHA - because the value is hashed rather than parsed.
+The shrinker gate keeps its fixed stream: `REQUIRE(has_trade_at_100(cmds))` is a precondition
+on the stream, so a new stream could fail that check for reasons unrelated to the shrinker.
+
 Benchmarks build only under the `Bench` configuration:
 
 ```bash

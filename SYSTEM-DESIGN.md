@@ -1985,6 +1985,66 @@ and the `taskset` question reopen, and PSI becomes worth the complexity.
 
 ---
 
+### D33 - The fuzz gate's seeds are fixed locally and rotated in CI
+
+**The two SEARCH gates take their seed from `ME_FUZZ_SEED` so CI can search new streams while
+local runs remain reproducible. With the variable unset (the local default), each gate uses its recorded
+literal unchanged. The CI `gate` job sets the variable per run and echoes it.**
+
+Previously, every gate call to `make_stream(seed, ops)` passed a literal seed. The million-operation
+property run repeated the same million operations every night, and the 100k differential
+repeated the same 100,000. The README's headline - *"1.1M operations, 758,717 assertions"* -
+describes a large **deterministic regression suite**. Repeating those streams added no input
+coverage.
+
+Fixed seeds let failures replay exactly and keep historical numbers comparable. The problem
+was that fixed seeds were the **only** option: the suite ran for six minutes a night without
+searching new streams.
+
+The seed handling has three details:
+
+- **The variable is hashed as a string with FNV-1a.** Any label works, including a run id, a date
+  or a commit SHA. A malformed value cannot silently become 0 through `strtoul` and make an
+  unchanged seed look like new coverage.
+- **The hash is XORed with the call site's own literal.** One environment value yields a
+  different stream per gate.
+- **The seed is echoed on passing and failing runs.** This lets you check, compare or deliberately re-run a passing
+  stream as well as a failing one.
+
+**The shrinker gate keeps its fixed seed.** `the_shrinker_reduces_a_failing_stream` opens with
+`REQUIRE(has_trade_at_100(cmds))`, a precondition on the stream. A fresh stream might contain no
+trade at 100 and fail before testing the shrinker. Rotation would make the test flaky and could
+mislead readers into diagnosing a shrinker bug.
+
+#### Alternatives rejected
+
+- **One seed per compiler** (`${{ github.run_id }}-${{ matrix.compiler }}`). This triples the
+  streams searched per run but makes failures harder to diagnose. If only g++-14 fails, its
+  newer sanitizers might have found real undefined behaviour, or its stream might differ.
+  Distinguishing the two requires a re-run. That diagnosis cost outweighs the extra coverage,
+  given that nightly runs already search fresh streams.
+- **Rotating in the fast `test` job too.** That job runs `-LE gate`, which excludes both search
+  tests by label.
+- **A random seed with no environment variable.** Failures must be reproducible. An input that
+  nobody can reconstruct defeats the reason for using fixed seeds.
+
+Naming follows `ME_BENCH_FORCE` and `ME_BENCH_MAX_LOAD` from D32.
+
+#### What would falsify this
+
+If a CI failure cannot be reproduced locally from the echoed seed, the mechanism has failed and
+this decision is invalid. Check reproduction before debugging the engine.
+
+If failures found by rotation start getting re-run until green instead of investigated, that
+repeats the failure of D30's skipped gate and D32's forced guard: ignoring a signal because
+acting on it was inconvenient. Finding failures is the purpose of rotation.
+
+**Revisit this decision** if the shrinker's predicate is replaced by one that holds for any
+stream; its seed can then join the rotation. Per-compiler seeds are worth reconsidering if no
+failed run in a year needs disambiguating. In that case, the tripled coverage is worth taking.
+
+---
+
 ## Open questions
 - Best-price cursor advance: linear scan vs occupancy-bitmap + `countr_zero`? (§3.2)
 - Cancel/replace on amend: keep the old order id or mint a fresh one? (§5.5)

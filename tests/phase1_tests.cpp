@@ -31,6 +31,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <limits>
 #include <random>
 
@@ -1068,6 +1069,17 @@ TEST_CASE("differential_with_cancels", "[phase4][oracle]") {
 
 namespace {
 
+// D33. Seed source for the two search gates: fixed locally, rotated in CI.
+[[nodiscard]] unsigned gate_seed(unsigned fixed) {
+    const char* env = std::getenv("ME_FUZZ_SEED");
+    if (env == nullptr || *env == '\0') return fixed;
+    unsigned h = 2166136261u;                     // FNV-1a: hashed, not parsed, so any label
+    for (const char* q = env; *q != '\0'; ++q) {  // works and no malformed value parses to 0
+        h = (h ^ static_cast<unsigned char>(*q)) * 16777619u;
+    }
+    return h ^ fixed;                             // keeps the two gates' streams distinct
+}
+
 // A deterministic command stream. Fixed seed, so a failure is reproducible
 // rather than a story about a run that once went wrong.
 std::vector<scenario::Command> make_stream(unsigned seed, int ops) {
@@ -1125,6 +1137,29 @@ std::vector<scenario::Command> make_stream(unsigned seed, int ops) {
 }
 
 } // namespace
+
+TEST_CASE("gate_seed is fixed by default and rotates on ME_FUZZ_SEED", "[phase7][plants]") {
+    // D33. Both branches: a rotation that silently does not rotate is indistinguishable
+    // from coverage, which is the failure this whole mechanism exists to avoid.
+    ::unsetenv("ME_FUZZ_SEED");
+    REQUIRE(gate_seed(20260908u) == 20260908u);   // local default IS the recorded stream
+
+    ::setenv("ME_FUZZ_SEED", "run-1", 1);
+    const unsigned a = gate_seed(20260908u);
+    CHECK(a != 20260908u);                        // it actually moved
+    CHECK(gate_seed(20260907u) != a);             // the two gates stay distinct
+
+    ::setenv("ME_FUZZ_SEED", "run-2", 1);
+    CHECK(gate_seed(20260908u) != a);             // a new label is a new stream
+
+    ::setenv("ME_FUZZ_SEED", "run-1", 1);
+    CHECK(gate_seed(20260908u) == a);             // and the same label replays it exactly
+
+    ::setenv("ME_FUZZ_SEED", "", 1);
+    CHECK(gate_seed(20260908u) == 20260908u);     // empty is unset, not a seed of ""
+
+    ::unsetenv("ME_FUZZ_SEED");
+}
 
 TEST_CASE("the log's text format is pinned, field by field", "[phase6][replay]") {
     // D27. `grep 'ACC |TRD |CXL |REJ ' tests/` returned NOTHING: to_line was only
@@ -2084,7 +2119,9 @@ TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") 
     // per-operation O(range) invariant walk, just one pass over the events.
     constexpr int kOps = 1'000'000;
 
-    const auto cmds = make_stream(20260907u, kOps);
+    const unsigned seed = gate_seed(20260907u);
+    INFO("stream seed " << seed);
+    const auto cmds = make_stream(seed, kOps);
 
     // The engine is constructed HERE rather than inside run_for_events because
     // conservation compares the log against the surviving book.
@@ -2134,7 +2171,9 @@ TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][ph
 
     Engine           real(kMin, kMax, 65536);
     naive::NaiveBook ref(kMin, kMax);
-    const auto       cmds = make_stream(20260908u, kOps);
+    const unsigned   seed = gate_seed(20260908u);
+    INFO("stream seed " << seed);
+    const auto       cmds = make_stream(seed, kOps);
 
     // Conservation folds the whole log, so checking it after EVERY operation
     // would make this O(ops^2). Every 5,000 instead — stated rather than
