@@ -126,8 +126,20 @@ jobs:
         run: cmake --build build -j
 
       # The full suite, gate included.
+      #
+      # ME_FUZZ_SEED rotates the stream for the two SEARCH gates - the million-operation
+      # property run and the 100k differential. Unset, which is the local default, reproduces
+      # the recorded streams exactly. The shrinker gate is deliberately NOT rotated: its
+      # REQUIRE(has_trade_at_100(cmds)) is a precondition on the stream, so a new one could
+      # fail it for a reason that is not the shrinker. One seed across the matrix, not one
+      # per compiler, so a red run is unambiguously the compiler rather than the stream.
+      # Echoed because a failure is only reproducible if the seed is in the log.
       - name: Test (everything)
-        run: ctest --test-dir build --output-on-failure
+        env:
+          ME_FUZZ_SEED: ${{ github.run_id }}
+        run: |
+          echo "ME_FUZZ_SEED=$ME_FUZZ_SEED"
+          ctest --test-dir build --output-on-failure
 
   # ---------------------------------------------------------------------------------------
   # The bench targets are COMPILED and never run.
