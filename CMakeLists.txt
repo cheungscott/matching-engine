@@ -138,10 +138,10 @@ target_link_libraries(test_types PRIVATE me_engine Catch2::Catch2WithMain)
 catch_discover_tests(test_types)
 
 # Engine acceptance suite.
-add_executable(phase1_tests tests/phase1_tests.cpp)
-target_link_libraries(phase1_tests PRIVATE me_engine Catch2::Catch2WithMain)
-target_include_directories(phase1_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-catch_discover_tests(phase1_tests)
+add_executable(engine_tests tests/engine_tests.cpp)
+target_link_libraries(engine_tests PRIVATE me_engine Catch2::Catch2WithMain)
+target_include_directories(engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+catch_discover_tests(engine_tests)
 
 # catch_discover_tests does not enumerate hidden [.gate] tests, so the three
 # most expensive cases in the project (the million-operation property run, the 100k
@@ -151,8 +151,8 @@ catch_discover_tests(phase1_tests)
 # Registered explicitly, and it runs BY DEFAULT: the safe thing should happen unless
 # you opt out. For the fast edit loop, opt out by label:
 #     ctest --test-dir build -LE gate
-add_test(NAME phase7_gate COMMAND phase1_tests "[gate]")
-set_tests_properties(phase7_gate PROPERTIES LABELS "gate" TIMEOUT 2400)
+add_test(NAME fuzz_gate COMMAND engine_tests "[gate]")
+set_tests_properties(fuzz_gate PROPERTIES LABELS "gate" TIMEOUT 2400)
 
 endif()   # NOT Bench
 

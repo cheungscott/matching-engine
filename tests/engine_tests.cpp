@@ -1,4 +1,4 @@
-// tests/phase1_tests.cpp — engine acceptance suite.
+// tests/engine_tests.cpp — engine acceptance suite.
 //
 // Tags filter by area: [pool] [level] [book] [engine] [oracle] [events] [replay]
 // [regression] [plants] [fuzz]. The three most expensive cases are also tagged
@@ -85,13 +85,13 @@ constexpr Price kMax = 110;
 //  ObjectPool — pool discipline
 // ===========================================================================
 
-TEST_CASE("pool_reports_capacity", "[phase1][pool]") {
+TEST_CASE("pool_reports_capacity", "[pool]") {
     ObjectPool<Order> pool(8);
     CHECK(pool.capacity() == std::size_t{8});
     CHECK(pool.in_use() == std::size_t{0});
 }
 
-TEST_CASE("pool_acquire_returns_distinct_live_slots", "[phase1][pool]") {
+TEST_CASE("pool_acquire_returns_distinct_live_slots", "[pool]") {
     ObjectPool<Order> pool(4);
     Order* a = pool.acquire();
     Order* b = pool.acquire();
@@ -101,7 +101,7 @@ TEST_CASE("pool_acquire_returns_distinct_live_slots", "[phase1][pool]") {
     CHECK(pool.in_use() == std::size_t{2});
 }
 
-TEST_CASE("pool_release_recycles_rather_than_leaking", "[phase1][pool]") {
+TEST_CASE("pool_release_recycles_rather_than_leaking", "[pool]") {
     ObjectPool<Order> pool(2);
     Order* a = pool.acquire();
     Order* b = pool.acquire();
@@ -121,7 +121,7 @@ TEST_CASE("pool_release_recycles_rather_than_leaking", "[phase1][pool]") {
     CHECK(pool.in_use() == std::size_t{0});
 }
 
-TEST_CASE("pool_slots_are_writable_after_acquire", "[phase1][pool]") {
+TEST_CASE("pool_slots_are_writable_after_acquire", "[pool]") {
     // A pool that poisons on release MUST unpoison on acquire. Under ASan this test
     // catches a missing unpoison: the write below would report use-after-poison on a
     // slot the caller legitimately owns.
@@ -151,7 +151,7 @@ TEST_CASE("pool_slots_are_writable_after_acquire", "[phase1][pool]") {
 //  and returns bool, and that return value is what makes them observable.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("pool_release_reports_success", "[phase1][pool]") {
+TEST_CASE("pool_release_reports_success", "[pool]") {
     ObjectPool<Order> pool(4);
     Order* a = pool.acquire();
     REQUIRE(a != nullptr);
@@ -159,7 +159,7 @@ TEST_CASE("pool_release_reports_success", "[phase1][pool]") {
     CHECK(pool.in_use() == std::size_t{0});
 }
 
-TEST_CASE("pool_release_null_is_a_noop", "[phase1][pool]") {
+TEST_CASE("pool_release_null_is_a_noop", "[pool]") {
     ObjectPool<Order> pool(4);
     Order* a = pool.acquire();
     REQUIRE(a != nullptr);
@@ -168,7 +168,7 @@ TEST_CASE("pool_release_null_is_a_noop", "[phase1][pool]") {
     CHECK(pool.free_list_is_consistent());
 }
 
-TEST_CASE("pool_double_release_is_rejected_not_absorbed", "[phase1][pool]") {
+TEST_CASE("pool_double_release_is_rejected_not_absorbed", "[pool]") {
     // The corruption this prevents, under -DNDEBUG: an unchecked second release splices
     // the free list into a cycle, in_use_ underflows to SIZE_MAX, and the next two
     // acquires return THE SAME SLOT.
@@ -188,7 +188,7 @@ TEST_CASE("pool_double_release_is_rejected_not_absorbed", "[phase1][pool]") {
     CHECK(x != y);
 }
 
-TEST_CASE("pool_release_rejects_a_foreign_pointer", "[phase1][pool]") {
+TEST_CASE("pool_release_rejects_a_foreign_pointer", "[pool]") {
     // Without the ownership check, under -DNDEBUG this is a wild WRITE ~16 GB out
     // (next_free_[kNil]), after poisoning 64 bytes of memory the pool does not own.
     ObjectPool<Order> pool(4);
@@ -202,7 +202,7 @@ TEST_CASE("pool_release_rejects_a_foreign_pointer", "[phase1][pool]") {
     CHECK(stack_order.id == OrderId{99});         // and not poisoned
 }
 
-TEST_CASE("pool_release_rejects_an_interior_pointer", "[phase1][pool]") {
+TEST_CASE("pool_release_rejects_an_interior_pointer", "[pool]") {
     // A pointer 8 bytes into a valid slot passes a range check but is not an
     // element boundary. Without the % check, `slot - base` on it is undefined behaviour:
     // the result can be garbage that is neither in range nor kNil, so the sentinel check
@@ -218,7 +218,7 @@ TEST_CASE("pool_release_rejects_an_interior_pointer", "[phase1][pool]") {
     CHECK(pool.free_list_is_consistent());
 }
 
-TEST_CASE("pool_acquire_clears_inherited_state", "[phase1][pool]") {
+TEST_CASE("pool_acquire_clears_inherited_state", "[pool]") {
     // Order carries intrusive prev/next links, so a recycled slot must come back with
     // them cleared. List code that trusts a stale link corrupts a PriceLevel, and ASan
     // cannot see it because those bytes are legitimately live after acquire.
@@ -240,7 +240,7 @@ TEST_CASE("pool_acquire_clears_inherited_state", "[phase1][pool]") {
     CHECK(second->remaining == Quantity{0});
 }
 
-TEST_CASE("pool_exhausts_then_recovers", "[phase1][pool]") {
+TEST_CASE("pool_exhausts_then_recovers", "[pool]") {
     ObjectPool<Order> pool(2);
     Order* a = pool.acquire();
     Order* b = pool.acquire();
@@ -257,7 +257,7 @@ TEST_CASE("pool_exhausts_then_recovers", "[phase1][pool]") {
     (void)b;
 }
 
-TEST_CASE("pool_free_list_survives_churn", "[phase1][pool]") {
+TEST_CASE("pool_free_list_survives_churn", "[pool]") {
     ObjectPool<Order> pool(8);
     std::vector<Order*> live;
 
@@ -275,7 +275,7 @@ TEST_CASE("pool_free_list_survives_churn", "[phase1][pool]") {
     }
 }
 
-TEST_CASE("pool_degenerate_capacities", "[phase1][pool]") {
+TEST_CASE("pool_degenerate_capacities", "[pool]") {
     SECTION("capacity 0 is a valid, permanently exhausted pool") {
         ObjectPool<Order> pool(0);
         CHECK(pool.capacity() == std::size_t{0});
@@ -298,7 +298,7 @@ TEST_CASE("pool_degenerate_capacities", "[phase1][pool]") {
 //  PriceLevel — FIFO by arrival, O(1) unlink, cached total
 // ===========================================================================
 
-TEST_CASE("level_starts_empty", "[phase1][level]") {
+TEST_CASE("level_starts_empty", "[level]") {
     PriceLevel lvl(102);
     CHECK(lvl.empty());
     CHECK(lvl.front() == nullptr);
@@ -306,7 +306,7 @@ TEST_CASE("level_starts_empty", "[phase1][level]") {
     CHECK(lvl.price() == Price{102});
 }
 
-TEST_CASE("level_push_back_one", "[phase1][level]") {
+TEST_CASE("level_push_back_one", "[level]") {
     PriceLevel lvl(102);
     Order a = make_order(1, Side::Sell, 102, 100, 1);
     lvl.push_back(&a);
@@ -316,7 +316,7 @@ TEST_CASE("level_push_back_one", "[phase1][level]") {
     CHECK(lvl.total_quantity() == Quantity{100});
 }
 
-TEST_CASE("level_is_fifo_oldest_at_front", "[phase1][level]") {
+TEST_CASE("level_is_fifo_oldest_at_front", "[level]") {
     // A3 arrives before A4, so A3 fills first. This is time priority, and it is
     // structural: fills come off the head, so being at the head IS being first.
     PriceLevel lvl(102);
@@ -329,7 +329,7 @@ TEST_CASE("level_is_fifo_oldest_at_front", "[phase1][level]") {
     CHECK(lvl.total_quantity() == Quantity{250});
 }
 
-TEST_CASE("level_unlink_head_promotes_the_next", "[phase1][level]") {
+TEST_CASE("level_unlink_head_promotes_the_next", "[level]") {
     PriceLevel lvl(102);
     Order a3 = make_order(3, Side::Sell, 102, 100, 3);
     Order a4 = make_order(4, Side::Sell, 102, 150, 4);
@@ -342,7 +342,7 @@ TEST_CASE("level_unlink_head_promotes_the_next", "[phase1][level]") {
     CHECK(!lvl.empty());
 }
 
-TEST_CASE("level_unlink_tail_keeps_head", "[phase1][level]") {
+TEST_CASE("level_unlink_tail_keeps_head", "[level]") {
     PriceLevel lvl(102);
     Order a3 = make_order(3, Side::Sell, 102, 100, 3);
     Order a4 = make_order(4, Side::Sell, 102, 150, 4);
@@ -354,7 +354,7 @@ TEST_CASE("level_unlink_tail_keeps_head", "[phase1][level]") {
     CHECK(lvl.total_quantity() == Quantity{100});
 }
 
-TEST_CASE("level_unlink_middle_keeps_list_intact", "[phase1][level]") {
+TEST_CASE("level_unlink_middle_keeps_list_intact", "[level]") {
     // The case that produces dangling pointers. Both neighbours must be
     // re-linked to each other, in both directions.
     PriceLevel lvl(102);
@@ -377,7 +377,7 @@ TEST_CASE("level_unlink_middle_keeps_list_intact", "[phase1][level]") {
     CHECK(lvl.total_quantity() == Quantity{0});
 }
 
-TEST_CASE("level_unlink_only_element_empties_it", "[phase1][level]") {
+TEST_CASE("level_unlink_only_element_empties_it", "[level]") {
     PriceLevel lvl(102);
     Order a = make_order(1, Side::Sell, 102, 100, 1);
     lvl.push_back(&a);
@@ -388,7 +388,7 @@ TEST_CASE("level_unlink_only_element_empties_it", "[phase1][level]") {
     CHECK(lvl.total_quantity() == Quantity{0});
 }
 
-TEST_CASE("level_is_reusable_after_being_emptied", "[phase1][level]") {
+TEST_CASE("level_is_reusable_after_being_emptied", "[level]") {
     // An emptied level is not a dead level — the price will be quoted again.
     PriceLevel lvl(102);
     Order a = make_order(1, Side::Sell, 102, 100, 1);
@@ -405,13 +405,13 @@ TEST_CASE("level_is_reusable_after_being_emptied", "[phase1][level]") {
 //  OrderBook — add and the BBO cursors
 // ===========================================================================
 
-TEST_CASE("book_starts_with_no_bbo", "[phase1][book]") {
+TEST_CASE("book_starts_with_no_bbo", "[book]") {
     OrderBook book(kMin, kMax);
     CHECK(!book.best_bid().has_value());
     CHECK(!book.best_ask().has_value());
 }
 
-TEST_CASE("book_add_buy_sets_best_bid_only", "[phase1][book]") {
+TEST_CASE("book_add_buy_sets_best_bid_only", "[book]") {
     OrderBook book(kMin, kMax);
     Order b = make_order(1, Side::Buy, 101, 300, 1);
     book.add(&b);
@@ -421,7 +421,7 @@ TEST_CASE("book_add_buy_sets_best_bid_only", "[phase1][book]") {
     CHECK(!book.best_ask().has_value());
 }
 
-TEST_CASE("book_best_bid_is_the_highest", "[phase1][book]") {
+TEST_CASE("book_best_bid_is_the_highest", "[book]") {
     OrderBook book(kMin, kMax);
     Order lo = make_order(1, Side::Buy, 100, 500, 1);
     Order hi = make_order(2, Side::Buy, 101, 300, 2);
@@ -435,7 +435,7 @@ TEST_CASE("book_best_bid_is_the_highest", "[phase1][book]") {
     check_bbo(book.best_bid(), 101);
 }
 
-TEST_CASE("book_best_ask_is_the_lowest", "[phase1][book]") {
+TEST_CASE("book_best_ask_is_the_lowest", "[book]") {
     OrderBook book(kMin, kMax);
     Order hi = make_order(1, Side::Sell, 103, 200, 1);
     Order lo = make_order(2, Side::Sell, 102, 250, 2);
@@ -448,7 +448,7 @@ TEST_CASE("book_best_ask_is_the_lowest", "[phase1][book]") {
     check_bbo(book.best_ask(), 102);
 }
 
-TEST_CASE("book_best_level_exposes_the_right_queue", "[phase1][book]") {
+TEST_CASE("book_best_level_exposes_the_right_queue", "[book]") {
     OrderBook book(kMin, kMax);
     Order a = make_order(1, Side::Sell, 102, 100, 1);
     book.add(&a);
@@ -462,7 +462,7 @@ TEST_CASE("book_best_level_exposes_the_right_queue", "[phase1][book]") {
     CHECK(book.best_level(Side::Buy) == nullptr);
 }
 
-TEST_CASE("book_stays_uncrossed_invariant_1", "[phase1][book]") {
+TEST_CASE("book_stays_uncrossed_invariant_1", "[book]") {
     // Both sides populated ⇒ best_bid < best_ask, at every public boundary.
     // A crossed book means the engine missed a trade. That is a BUG, not a
     // market condition.
@@ -483,7 +483,7 @@ TEST_CASE("book_stays_uncrossed_invariant_1", "[phase1][book]") {
 //  Engine::apply — match first, rest second
 // ===========================================================================
 
-TEST_CASE("engine_rests_an_order_on_an_empty_book", "[phase1][engine]") {
+TEST_CASE("engine_rests_an_order_on_an_empty_book", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -495,7 +495,7 @@ TEST_CASE("engine_rests_an_order_on_an_empty_book", "[phase1][engine]") {
     check_bbo(eng.book().best_bid(), 101);
 }
 
-TEST_CASE("engine_does_not_match_when_it_does_not_cross", "[phase1][engine]") {
+TEST_CASE("engine_does_not_match_when_it_does_not_cross", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -509,7 +509,7 @@ TEST_CASE("engine_does_not_match_when_it_does_not_cross", "[phase1][engine]") {
     check_bbo(eng.book().best_ask(), 102);
 }
 
-TEST_CASE("engine_exact_full_fill_at_one_price", "[phase1][engine]") {
+TEST_CASE("engine_exact_full_fill_at_one_price", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -528,7 +528,7 @@ TEST_CASE("engine_exact_full_fill_at_one_price", "[phase1][engine]") {
     CHECK(!eng.book().best_ask().has_value());
 }
 
-TEST_CASE("engine_prints_the_trade_at_the_makers_price", "[phase1][engine]") {
+TEST_CASE("engine_prints_the_trade_at_the_makers_price", "[engine]") {
     // The taker is willing to pay 103. The resting ask is at 102. The trade
     // MUST print at 102 — the maker set the terms first. The taker receives
     // price improvement. Backwards here and every P&L number downstream is wrong.
@@ -544,7 +544,7 @@ TEST_CASE("engine_prints_the_trade_at_the_makers_price", "[phase1][engine]") {
     if (trades.size() == 1) CHECK(trades[0].price == Price{102});
 }
 
-TEST_CASE("engine_treats_equal_prices_as_crossing", "[phase1][engine]") {
+TEST_CASE("engine_treats_equal_prices_as_crossing", "[engine]") {
     // THE ONE-CHARACTER BUG. An order priced exactly AT the opposite best must
     // trade, not rest. `<` instead of `<=` leaves an ask at 101 sitting beside
     // a bid at 101 — a locked book, which is a missed trade.
@@ -562,7 +562,7 @@ TEST_CASE("engine_treats_equal_prices_as_crossing", "[phase1][engine]") {
     CHECK(!eng.book().best_ask().has_value());
 }
 
-TEST_CASE("engine_attributes_maker_and_taker", "[phase1][engine]") {
+TEST_CASE("engine_attributes_maker_and_taker", "[engine]") {
     // Falls out of matching for free — the resting side is ALWAYS the maker —
     // but the emitted event has to carry it, because fees, rebates and every
     // downstream analytic key off it.
@@ -587,7 +587,7 @@ TEST_CASE("engine_attributes_maker_and_taker", "[phase1][engine]") {
 //  Partial fills, FIFO within a level, level sums
 // ===========================================================================
 
-TEST_CASE("level_reduce_front_keeps_position_and_total", "[phase2][level]") {
+TEST_CASE("level_reduce_front_keeps_position_and_total", "[level]") {
     PriceLevel lvl(102);
     Order a = make_order(1, Side::Sell, 102, 100, 1);
     Order b = make_order(2, Side::Sell, 102, 150, 2);
@@ -602,7 +602,7 @@ TEST_CASE("level_reduce_front_keeps_position_and_total", "[phase2][level]") {
     CHECK(lvl.is_consistent());
 }
 
-TEST_CASE("engine_partial_fill_of_the_resting_order", "[phase2][engine]") {
+TEST_CASE("engine_partial_fill_of_the_resting_order", "[engine]") {
     // Incoming is SMALLER than the resting order. The maker stays, shrunk, and
     // keeps its queue position.
     Engine eng(kMin, kMax, 64);
@@ -623,7 +623,7 @@ TEST_CASE("engine_partial_fill_of_the_resting_order", "[phase2][engine]") {
     CHECK(eng.book().is_consistent());
 }
 
-TEST_CASE("engine_partial_fill_of_the_incoming_order", "[phase2][engine]") {
+TEST_CASE("engine_partial_fill_of_the_incoming_order", "[engine]") {
     // Incoming is LARGER than the only resting order. It trades what it can and
     // rests the remainder at its own price.
     Engine eng(kMin, kMax, 64);
@@ -643,7 +643,7 @@ TEST_CASE("engine_partial_fill_of_the_incoming_order", "[phase2][engine]") {
     CHECK(eng.book().is_consistent());
 }
 
-TEST_CASE("engine_consumes_a_level_in_fifo_order", "[phase2][engine]") {
+TEST_CASE("engine_consumes_a_level_in_fifo_order", "[engine]") {
     // Two makers at one price. The oldest fills first and the trades say so.
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
@@ -667,7 +667,7 @@ TEST_CASE("engine_consumes_a_level_in_fifo_order", "[phase2][engine]") {
     CHECK(eng.book().is_consistent());
 }
 
-TEST_CASE("engine_stops_mid_level_leaving_the_second_maker_partly_filled", "[phase2][engine]") {
+TEST_CASE("engine_stops_mid_level_leaving_the_second_maker_partly_filled", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -689,7 +689,7 @@ TEST_CASE("engine_stops_mid_level_leaving_the_second_maker_partly_filled", "[pha
     CHECK(eng.book().is_consistent());
 }
 
-TEST_CASE("engine_pool_returns_every_fully_consumed_maker", "[phase2][engine]") {
+TEST_CASE("engine_pool_returns_every_fully_consumed_maker", "[engine]") {
     // Invariant 7 across a fill: a maker consumed to zero goes back to the pool.
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
@@ -709,7 +709,7 @@ TEST_CASE("engine_pool_returns_every_fully_consumed_maker", "[phase2][engine]") 
 //  Walk levels, market orders, and the differential oracle
 // ===========================================================================
 
-TEST_CASE("engine_walks_two_price_levels", "[phase3][engine]") {
+TEST_CASE("engine_walks_two_price_levels", "[engine]") {
     // A two-level sweep: 250 resting at 102, 200 at 103, and a buy for 300 at limit 103.
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
@@ -739,7 +739,7 @@ TEST_CASE("engine_walks_two_price_levels", "[phase3][engine]") {
     CHECK(eng.book().is_consistent());
 }
 
-TEST_CASE("engine_price_improvement_across_the_sweep", "[phase3][engine]") {
+TEST_CASE("engine_price_improvement_across_the_sweep", "[engine]") {
     // Willing to pay 104, but every fill prints at the resting price.
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
@@ -757,7 +757,7 @@ TEST_CASE("engine_price_improvement_across_the_sweep", "[phase3][engine]") {
     CHECK(eng.book().is_consistent());
 }
 
-TEST_CASE("engine_market_order_sweeps_and_never_rests", "[phase3][engine]") {
+TEST_CASE("engine_market_order_sweeps_and_never_rests", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -778,7 +778,7 @@ TEST_CASE("engine_market_order_sweeps_and_never_rests", "[phase3][engine]") {
     CHECK(eng.book().is_consistent());
 }
 
-TEST_CASE("engine_market_order_into_an_empty_book", "[phase3][engine]") {
+TEST_CASE("engine_market_order_into_an_empty_book", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -791,7 +791,7 @@ TEST_CASE("engine_market_order_into_an_empty_book", "[phase3][engine]") {
     CHECK(eng.pool().in_use() == std::size_t{0});
 }
 
-TEST_CASE("engine_boundary_at_or_better_includes_equal", "[phase3][engine]") {
+TEST_CASE("engine_boundary_at_or_better_includes_equal", "[engine]") {
     // The one-character bug, checked in both directions.
     Engine eng(kMin, kMax, 64);
 
@@ -831,7 +831,7 @@ TEST_CASE("engine_boundary_at_or_better_includes_equal", "[phase3][engine]") {
 //  a matching outcome, and NaiveBook does not model the engine's counter.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("differential_engine_matches_the_naive_book", "[phase3][oracle]") {
+TEST_CASE("differential_engine_matches_the_naive_book", "[oracle]") {
     constexpr Price kLo = 98;      // narrow band so orders actually cross
     constexpr Price kHi = 104;
     constexpr int   kOps = 2000;
@@ -885,7 +885,7 @@ TEST_CASE("differential_engine_matches_the_naive_book", "[phase3][oracle]") {
 //  Cancel by id, the index, and check_invariants()
 // ===========================================================================
 
-TEST_CASE("cancel_removes_a_resting_order", "[phase4][engine]") {
+TEST_CASE("cancel_removes_a_resting_order", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -901,7 +901,7 @@ TEST_CASE("cancel_removes_a_resting_order", "[phase4][engine]") {
     CHECK(eng.check_invariants());
 }
 
-TEST_CASE("cancel_of_an_unknown_id_is_routine", "[phase4][engine]") {
+TEST_CASE("cancel_of_an_unknown_id_is_routine", "[engine]") {
     // Not an error. A fill and a cancel legitimately race and the fill can win.
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
@@ -914,7 +914,7 @@ TEST_CASE("cancel_of_an_unknown_id_is_routine", "[phase4][engine]") {
     CHECK(eng.check_invariants());
 }
 
-TEST_CASE("cancel_after_the_order_already_filled", "[phase4][engine]") {
+TEST_CASE("cancel_after_the_order_already_filled", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -929,7 +929,7 @@ TEST_CASE("cancel_after_the_order_already_filled", "[phase4][engine]") {
     CHECK(eng.check_invariants());
 }
 
-TEST_CASE("cancel_from_the_middle_of_a_level_keeps_fifo", "[phase4][engine]") {
+TEST_CASE("cancel_from_the_middle_of_a_level_keeps_fifo", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -953,7 +953,7 @@ TEST_CASE("cancel_from_the_middle_of_a_level_keeps_fifo", "[phase4][engine]") {
     CHECK(eng.check_invariants());
 }
 
-TEST_CASE("cancel_that_empties_the_best_level_advances_the_cursor", "[phase4][engine]") {
+TEST_CASE("cancel_that_empties_the_best_level_advances_the_cursor", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -969,7 +969,7 @@ TEST_CASE("cancel_that_empties_the_best_level_advances_the_cursor", "[phase4][en
     CHECK(eng.check_invariants());
 }
 
-TEST_CASE("cancel_of_a_non_best_level_leaves_the_cursor_alone", "[phase4][engine]") {
+TEST_CASE("cancel_of_a_non_best_level_leaves_the_cursor_alone", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
 
@@ -984,7 +984,7 @@ TEST_CASE("cancel_of_a_non_best_level_leaves_the_cursor_alone", "[phase4][engine
     CHECK(eng.check_invariants());
 }
 
-TEST_CASE("cancelling_everything_returns_every_slot", "[phase4][engine]") {
+TEST_CASE("cancelling_everything_returns_every_slot", "[engine]") {
     Engine eng(kMin, kMax, 64);
     std::vector<Trade> trades;
     std::vector<OrderId> ids;
@@ -1003,7 +1003,7 @@ TEST_CASE("cancelling_everything_returns_every_slot", "[phase4][engine]") {
     CHECK(eng.check_invariants());
 }
 
-TEST_CASE("differential_with_cancels", "[phase4][oracle]") {
+TEST_CASE("differential_with_cancels", "[oracle]") {
     // The oracle with cancels mixed in. Every removal path in the engine -
     // fill-to-zero and cancel - is exercised against an implementation that
     // finds orders by scanning, so it cannot share the index's bugs.
@@ -1137,7 +1137,7 @@ std::vector<scenario::Command> make_stream(unsigned seed, int ops) {
 
 } // namespace
 
-TEST_CASE("gate_seed is fixed by default and rotates on ME_FUZZ_SEED", "[phase7][plants]") {
+TEST_CASE("gate_seed is fixed by default and rotates on ME_FUZZ_SEED", "[plants]") {
     // Both branches: a rotation that silently does not rotate is indistinguishable
     // from coverage, which is the failure this whole mechanism exists to avoid.
     ::unsetenv("ME_FUZZ_SEED");
@@ -1160,7 +1160,7 @@ TEST_CASE("gate_seed is fixed by default and rotates on ME_FUZZ_SEED", "[phase7]
     ::unsetenv("ME_FUZZ_SEED");
 }
 
-TEST_CASE("the log's text format is pinned, field by field", "[phase6][replay]") {
+TEST_CASE("the log's text format is pinned, field by field", "[replay]") {
     // The other replay tests compare to_line's output only against itself, so on their own
     // they stay green even if the format drops fields entirely. The log is the artefact
     // the project calls "the truth", so its shape is pinned here.
@@ -1183,7 +1183,7 @@ TEST_CASE("the log's text format is pinned, field by field", "[phase6][replay]")
 }
 
 TEST_CASE("two market orders differing only in junk price log identically",
-          "[phase6][replay]") {
+          "[replay]") {
     // The engine normalises a market order's meaningless price to 0 so that behaviourally
     // identical orders produce byte-identical logs. Only two streams that differ in the
     // junk price can see that normalisation go missing: the other replay tests compare
@@ -1204,7 +1204,7 @@ TEST_CASE("two market orders differing only in junk price log identically",
     CHECK(log_with(0) == log_with(-99));
 }
 
-TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
+TEST_CASE("events_are_emitted_for_every_outcome", "[events]") {
     Engine eng(kMin, kMax, 64);
     VectorSink sink;
     eng.set_sink(&sink);
@@ -1252,7 +1252,7 @@ TEST_CASE("events_are_emitted_for_every_outcome", "[phase6][events]") {
     CHECK(after == maker + 2);
 }
 
-TEST_CASE("market_remainder_is_cancelled_with_no_liquidity", "[phase6][events]") {
+TEST_CASE("market_remainder_is_cancelled_with_no_liquidity", "[events]") {
     Engine eng(kMin, kMax, 64);
     VectorSink sink;
     eng.set_sink(&sink);
@@ -1267,7 +1267,7 @@ TEST_CASE("market_remainder_is_cancelled_with_no_liquidity", "[phase6][events]")
     CHECK(std::get<OrderCancelled>(ev[1]).reason == CancelReason::NoLiquidity);
 }
 
-TEST_CASE("sequence_numbers_never_go_backwards", "[phase6][events]") {
+TEST_CASE("sequence_numbers_never_go_backwards", "[events]") {
     const auto cmds = make_stream(31337u, 2000);
     Engine eng(kMin, kMax, 8192);
     VectorSink sink;
@@ -1289,7 +1289,7 @@ TEST_CASE("sequence_numbers_never_go_backwards", "[phase6][events]") {
     CHECK(sink.events().size() > 2000);
 }
 
-TEST_CASE("replay_the_same_input_twice_gives_a_byte_identical_log", "[phase6][replay]") {
+TEST_CASE("replay_the_same_input_twice_gives_a_byte_identical_log", "[replay]") {
     // The whole claim of the design, in one assertion. ~10k commands.
     const auto cmds = make_stream(20260906u, 10000);
 
@@ -1300,7 +1300,7 @@ TEST_CASE("replay_the_same_input_twice_gives_a_byte_identical_log", "[phase6][re
     REQUIRE(first == second);           // byte for byte, fresh engine each time
 }
 
-TEST_CASE("a_scenario_round_trips_through_text", "[phase6][replay]") {
+TEST_CASE("a_scenario_round_trips_through_text", "[replay]") {
     // The log is only useful as a regression net if it survives being written
     // out and read back. This is also the LOBSTER on-ramp.
     const auto cmds = make_stream(4242u, 3000);
@@ -1315,7 +1315,7 @@ TEST_CASE("a_scenario_round_trips_through_text", "[phase6][replay]") {
     REQUIRE(scenario::run(parsed, kMin, kMax, 8192) == scenario::run(cmds, kMin, kMax, 8192));
 }
 
-TEST_CASE("the_log_changes_when_behaviour_changes", "[phase6][replay]") {
+TEST_CASE("the_log_changes_when_behaviour_changes", "[replay]") {
     // A replay test that passes no matter what is worthless. One different
     // command must move the log, or the diff is not actually watching anything.
     auto cmds = make_stream(777u, 500);
@@ -1358,7 +1358,7 @@ std::vector<Event> run_for_events(const std::vector<scenario::Command>& cmds,
 
 } // namespace
 
-TEST_CASE("a lookup's probe length does not grow with the book", "[phase7][audit]") {
+TEST_CASE("a lookup's probe length does not grow with the book", "[regression]") {
     // This is the regression that matters most in the file.
     //
     // An IDENTITY hash looks ideal for engine ids, which strictly increase: masking spreads
@@ -1394,7 +1394,7 @@ TEST_CASE("a lookup's probe length does not grow with the book", "[phase7][audit
     }
 }
 
-TEST_CASE("the fuzz generator actually exercises the cancel-hit path", "[phase7][audit]") {
+TEST_CASE("the fuzz generator actually exercises the cancel-hit path", "[regression]") {
     // A generator that draws cancel ids uniformly over every id ever issued makes most
     // cancels miss, which leaves the most expensive path in the engine (index lookup,
     // unlink, index erase, pool release, cursor advance) the least exercised. A green
@@ -1424,7 +1424,7 @@ TEST_CASE("the fuzz generator actually exercises the cancel-hit path", "[phase7]
 }
 
 TEST_CASE("the guards that exist to prevent corruption are themselves tested",
-          "[phase7][audit]") {
+          "[regression]") {
     // Every one of these throws stops an out-of-bounds write or an overflow. A guard
     // nobody exercises is indistinguishable from a guard that does not work.
     SECTION("add() refuses a price outside the tick window") {
@@ -1472,7 +1472,7 @@ TEST_CASE("the guards that exist to prevent corruption are themselves tested",
 //  clause is individually load-bearing.
 // ===========================================================================
 
-TEST_CASE("the book's consistency check catches a corrupted cursor", "[phase7][plants]") {
+TEST_CASE("the book's consistency check catches a corrupted cursor", "[plants]") {
     OrderBook book(kMin, kMax, 16);
     Order b1 = make_order(1, Side::Buy,  100, 10, 1);
     Order b2 = make_order(2, Side::Buy,  101, 10, 2);
@@ -1498,7 +1498,7 @@ TEST_CASE("the book's consistency check catches a corrupted cursor", "[phase7][p
     }
 }
 
-TEST_CASE("the book's consistency check catches a corrupted order", "[phase7][plants]") {
+TEST_CASE("the book's consistency check catches a corrupted order", "[plants]") {
     OrderBook book(kMin, kMax, 16);
     Order b1 = make_order(1, Side::Buy, 100, 10, 1);
     Order b2 = make_order(2, Side::Buy, 100, 20, 2);
@@ -1536,7 +1536,7 @@ TEST_CASE("the book's consistency check catches a corrupted order", "[phase7][pl
 }
 
 TEST_CASE("the book's consistency check catches a corrupted bitmap or index",
-          "[phase7][plants]") {
+          "[plants]") {
     // The bitmap clause is the only check that sees a stale or missing occupancy bit, so
     // both directions are planted here.
     OrderBook book(kMin, kMax, 16);
@@ -1558,7 +1558,7 @@ TEST_CASE("the book's consistency check catches a corrupted bitmap or index",
     }
 }
 
-TEST_CASE("a level's consistency check catches a broken list", "[phase7][plants]") {
+TEST_CASE("a level's consistency check catches a broken list", "[plants]") {
     PriceLevel lvl;
     lvl.set_price(100);
     Order o1 = make_order(1, Side::Buy, 100, 10, 1);
@@ -1584,7 +1584,7 @@ TEST_CASE("a level's consistency check catches a broken list", "[phase7][plants]
     }
 }
 
-TEST_CASE("the pool's free-list check catches a corrupted list", "[phase7][plants]") {
+TEST_CASE("the pool's free-list check catches a corrupted list", "[plants]") {
     ObjectPool<Order> pool(8);
     Order* a = pool.acquire();
     Order* b = pool.acquire();
@@ -1656,7 +1656,7 @@ void expect_fold(const std::vector<Event>& log, const char* fragment) {
 
 } // namespace
 
-TEST_CASE("every acceptance-checking branch has a planted violation", "[phase7][plants]") {
+TEST_CASE("every acceptance-checking branch has a planted violation", "[plants]") {
     SECTION("order id reused") {
         expect_check({acc(1, 1, Side::Buy, OrderType::Limit, 100, 10),
                       acc(2, 1, Side::Buy, OrderType::Limit, 101, 10)}, "order id reused");
@@ -1667,7 +1667,7 @@ TEST_CASE("every acceptance-checking branch has a planted violation", "[phase7][
     }
 }
 
-TEST_CASE("every trade-legality branch has a planted violation", "[phase7][plants]") {
+TEST_CASE("every trade-legality branch has a planted violation", "[plants]") {
     // A well-formed pair to corrupt: maker sells 10 at 100, taker buys 10 at 100.
     const Event mk = acc(1, 1, Side::Sell, OrderType::Limit, 100, 10);
     const Event tk = acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10);
@@ -1711,7 +1711,7 @@ TEST_CASE("every trade-legality branch has a planted violation", "[phase7][plant
     }
 }
 
-TEST_CASE("both price-priority branches have a planted violation", "[phase7][plants]") {
+TEST_CASE("both price-priority branches have a planted violation", "[plants]") {
     // A taker sweeps best-first, so its fills can only get worse for it. A taker that
     // trades at 101 and THEN at 100 skipped the better level.
     SECTION("a buy taker's fills improved") {
@@ -1732,7 +1732,7 @@ TEST_CASE("both price-priority branches have a planted violation", "[phase7][pla
     }
 }
 
-TEST_CASE("every remaining check() branch has a planted violation", "[phase7][plants]") {
+TEST_CASE("every remaining check() branch has a planted violation", "[plants]") {
     SECTION("a cancelled order traded again") {
         expect_check({acc(1, 1, Side::Sell, OrderType::Limit, 100, 10),
                       acc(2, 2, Side::Buy,  OrderType::Limit, 100, 10),
@@ -1757,7 +1757,7 @@ TEST_CASE("every remaining check() branch has a planted violation", "[phase7][pl
     }
 }
 
-TEST_CASE("every fold_ledger branch has a planted violation", "[phase7][plants]") {
+TEST_CASE("every fold_ledger branch has a planted violation", "[plants]") {
     // props::check rejects most of these logs earlier, under a different rule, so they
     // are planted against the fold directly.
     SECTION("fill against an order the log shows as not live") {
@@ -1780,7 +1780,7 @@ TEST_CASE("every fold_ledger branch has a planted violation", "[phase7][plants]"
 }
 
 TEST_CASE("every conservation branch that CAN fire has a planted violation",
-          "[phase7][plants]") {
+          "[plants]") {
     // A real book with two resting orders and no trades, so the log can be corrupted
     // one field at a time without the fold rejecting it for an unrelated reason.
     Engine     eng(kMin, kMax, 64);
@@ -1830,7 +1830,7 @@ TEST_CASE("every conservation branch that CAN fire has a planted violation",
 //  it can regress silently.
 // ===========================================================================
 
-TEST_CASE("an OrderType outside the enumerators is rejected, not executed", "[phase7][audit]") {
+TEST_CASE("an OrderType outside the enumerators is rejected, not executed", "[regression]") {
     // An out-of-range OrderType must be rejected. It reserves no pool slot and skips price
     // validation, so on the resting path under NDEBUG it would WRITE through a null slot.
     // scenario.hpp can produce one: it casts an integer straight off a log.
@@ -1854,7 +1854,7 @@ TEST_CASE("an OrderType outside the enumerators is rejected, not executed", "[ph
     CHECK(r->reason == RejectReason::MalformedOrder);
 }
 
-TEST_CASE("a Side outside the enumerators is rejected", "[phase7][audit]") {
+TEST_CASE("a Side outside the enumerators is rejected", "[regression]") {
     // Less dangerous than the OrderType hole — every comparison is `== Buy`, so
     // a stray value behaves consistently as Sell — but it still writes junk into the
     // log, and the log is the artefact the replay test proves byte-identical.
@@ -1867,7 +1867,7 @@ TEST_CASE("a Side outside the enumerators is rejected", "[phase7][audit]") {
 }
 
 TEST_CASE("a quantity above the cap is rejected before it can wrap a level total",
-          "[phase7][audit]") {
+          "[regression]") {
     // Without the cap, two orders of 2^63 at one price wrap PriceLevel's cached sum, and
     // depth_at() reports ZERO while 2^64 rests, with every invariant green, because
     // is_consistent() recomputes the sum with the same wrapping arithmetic.
@@ -1885,7 +1885,7 @@ TEST_CASE("a quantity above the cap is rejected before it can wrap a level total
     REQUIRE(eng.check_invariants());
 }
 
-TEST_CASE("a marketable limit still trades when the pool is exhausted", "[phase7][audit]") {
+TEST_CASE("a marketable limit still trades when the pool is exhausted", "[regression]") {
     // Guards against a full pool rejecting a marketable limit order. Reserving a slot for
     // EVERY limit order before matching would refuse this one at capacity, yet it consumes
     // resting liquidity and frees slots, which is exactly what a full venue wants. The
@@ -1909,7 +1909,7 @@ TEST_CASE("a marketable limit still trades when the pool is exhausted", "[phase7
     REQUIRE(eng.check_invariants());
 }
 
-TEST_CASE("a remainder rests on a slot its own fill freed", "[phase7][audit]") {
+TEST_CASE("a remainder rests on a slot its own fill freed", "[regression]") {
     // The other half of the same guard: cancelling the remainder for want of a slot would
     // be the same mistake one step later. A surviving remainder means every crossing
     // maker was fully consumed, and retiring each returned its slot, so a slot is free
@@ -1940,7 +1940,7 @@ TEST_CASE("a remainder rests on a slot its own fill freed", "[phase7][audit]") {
     CHECK(props::check_conservation(sink.events(), eng.book()).ok);
 }
 
-TEST_CASE("a fully filled limit returns the slot it reserved", "[phase7][audit]") {
+TEST_CASE("a fully filled limit returns the slot it reserved", "[regression]") {
     // The slot guard on its ordinary path. The slot is held by a guard rather than released
     // explicitly, so it also comes back to the pool if fill() throws.
     Engine             eng(kMin, kMax, 8);
@@ -1955,7 +1955,7 @@ TEST_CASE("a fully filled limit returns the slot it reserved", "[phase7][audit]"
     CHECK(eng.pool().free_list_is_consistent());
 }
 
-TEST_CASE("the book refuses id 0 rather than corrupting its index", "[phase7][audit]") {
+TEST_CASE("the book refuses id 0 rather than corrupting its index", "[regression]") {
     // IdIndex uses id 0 as its EMPTY marker, and Engine never issues id 0.
     // add() checks the id unconditionally, as it does the price: under NDEBUG an id-0
     // order would be written into a slot that still reads as empty, is never consumed,
@@ -1968,7 +1968,7 @@ TEST_CASE("the book refuses id 0 rather than corrupting its index", "[phase7][au
 }
 
 TEST_CASE("the book refuses to overfill its id index rather than probing forever",
-          "[phase7][audit]") {
+          "[regression]") {
     // add() refuses an order that would breach the id index's load factor, before
     // mutating anything, and a lookup of a missing id must terminate. An unbounded probe
     // loop over a full table spins forever, and an ASSERT on the load factor is deleted by
@@ -1987,7 +1987,7 @@ TEST_CASE("the book refuses to overfill its id index rather than probing forever
     CHECK(book.find(999) == nullptr);     // and a miss TERMINATES
 }
 
-TEST_CASE("a const OrderBook yields a const Order", "[phase7][audit]") {
+TEST_CASE("a const OrderBook yields a const Order", "[regression]") {
     // Enforced by the type system rather than by a runtime check. A const find() that
     // handed out a mutable Order* would make the const-only Engine::book() decorative:
     // mutating o->price through it and then cancelling would unlink the order from a
@@ -2002,7 +2002,7 @@ TEST_CASE("a const OrderBook yields a const Order", "[phase7][audit]") {
     SUCCEED("checked at compile time");
 }
 
-TEST_CASE("conservation_holds_after_every_operation", "[phase7][fuzz]") {
+TEST_CASE("conservation_holds_after_every_operation", "[fuzz]") {
     // Conservation should hold after EVERY operation. It is O(log + resting) per call, so
     // the every-op version runs on a small stream and the gate runs it at checkpoints and
     // at the end. Both, rather than neither.
@@ -2025,7 +2025,7 @@ TEST_CASE("conservation_holds_after_every_operation", "[phase7][fuzz]") {
     }
 }
 
-TEST_CASE("conservation_survives_pool_exhaustion", "[phase7][fuzz]") {
+TEST_CASE("conservation_survives_pool_exhaustion", "[fuzz]") {
     // Exhaustion is where an id could be burned or an order half-accepted. A tiny pool
     // guarantees rejections, and an OrderRejected moves no quantity, so if the engine ever
     // burns an id or half-accepts an order, accepted stops matching filled+withdrawn+resting.
@@ -2048,7 +2048,7 @@ TEST_CASE("conservation_survives_pool_exhaustion", "[phase7][fuzz]") {
     REQUIRE(c.ok);
 }
 
-TEST_CASE("the_conservation_checker_catches_a_planted_violation", "[phase7][fuzz]") {
+TEST_CASE("the_conservation_checker_catches_a_planted_violation", "[fuzz]") {
     // Same discipline as the property checker above: a checker that never fails
     // is an expensive way of computing `true`. These four corruptions of a real log check
     // only that conservation fails; the plants above pin each conservation branch by name.
@@ -2101,7 +2101,7 @@ TEST_CASE("the_conservation_checker_catches_a_planted_violation", "[phase7][fuzz
     }
 }
 
-TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") {
+TEST_CASE("properties_hold_over_a_million_operations", "[.gate][fuzz]") {
     // Every log property and conservation hold across a million operations. Properties
     // are checked against the log rather than the book, so this stays cheap enough to
     // run at scale: no per-operation O(range) invariant walk, just one pass over the events.
@@ -2151,7 +2151,7 @@ TEST_CASE("properties_hold_over_a_million_operations", "[.gate][phase7][fuzz]") 
     REQUIRE(c.ok);
 }
 
-TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][phase7][fuzz]") {
+TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][fuzz]") {
     // The expensive one: oracle diff AND all seven invariants after EVERY
     // operation. Smaller count because each step is O(range + resting).
     constexpr int kOps = 100'000;
@@ -2220,7 +2220,7 @@ TEST_CASE("differential_holds_over_100k_operations_with_invariants", "[.gate][ph
     }
 }
 
-TEST_CASE("the_property_checker_catches_a_planted_violation", "[phase7][fuzz]") {
+TEST_CASE("the_property_checker_catches_a_planted_violation", "[fuzz]") {
     // A checker that never fails proves nothing. Corrupt a log four ways and
     // confirm each one is caught — otherwise the million-operation run above is
     // a very expensive way of computing `true`.
@@ -2261,7 +2261,7 @@ TEST_CASE("the_property_checker_catches_a_planted_violation", "[phase7][fuzz]") 
     }
 }
 
-TEST_CASE("the_shrinker_reduces_a_failing_stream", "[.gate][phase7][fuzz]") {
+TEST_CASE("the_shrinker_reduces_a_failing_stream", "[.gate][fuzz]") {
     // Shrinking is the one thing a property library gives that a seeded loop
     // does not, so it needs its own test. Predicate: "the log contains a trade
     // at price 100" — arbitrary, but it depends on a specific few commands, so

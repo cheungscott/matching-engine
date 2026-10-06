@@ -7,7 +7,7 @@
 
 using namespace me;
 
-TEST_CASE("Order is well-formed when remaining <= quantity", "[types][phase0]") {
+TEST_CASE("Order is well-formed when remaining <= quantity", "[types]") {
     Order o{
         .id = 1, .side = Side::Buy, .type = OrderType::Limit,
         .price = 100, .quantity = 50, .remaining = 50,

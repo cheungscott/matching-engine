@@ -42,7 +42,7 @@ jobs:
   # The fast loop. Runs on every push. Everything EXCEPT the fuzz gate.
   #
   # `-LE gate` is a LABEL exclusion, the same one `ctest --preset fast` applies and the
-  # document. Not `-E gate`, which is a name regex: it happens to match `phase7_gate` today,
+  # opt-out CMakeLists.txt documents. Not `-E gate`, a name regex: it matches `fuzz_gate`
   # today, but would silently also exclude any future test whose NAME contains "gate".
   # ---------------------------------------------------------------------------------------
   test:
@@ -98,7 +98,7 @@ jobs:
     name: gate (${{ matrix.compiler }})
     if: github.event_name != 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60   # the ctest TIMEOUT on phase7_gate is 2400s; this bounds the job around it
+    timeout-minutes: 60   # the ctest TIMEOUT on fuzz_gate is 2400s; this bounds the job around it
     strategy:
       fail-fast: false
       matrix:
