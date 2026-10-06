@@ -81,7 +81,7 @@ if(NOT MSVC)
   endif()
 endif()
 
-# Loud refusal rather than a silently unsanitized "Debug" build.
+# Loud warning rather than a silently unsanitized "Debug" build.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND WIN32 AND NOT MSVC)
   message(WARNING
     "Debug on MinGW has NO AddressSanitizer (no libasan for this target), and "
