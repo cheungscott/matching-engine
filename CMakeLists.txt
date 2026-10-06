@@ -84,9 +84,9 @@ endif()
 # Loud refusal rather than a silently unsanitized "Debug" build.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND WIN32 AND NOT MSVC)
   message(WARNING
-    "Debug on MinGW has NO AddressSanitizer (no libasan for this target). "
-    "The test suite's acceptance criterion is 'ASan clean' — build Debug under WSL/Linux "
-    "for that. This build will compile and run, but it verifies less than it looks.")
+    "Debug on MinGW has NO AddressSanitizer (no libasan for this target), and "
+    "engine_tests does not build here: it uses POSIX setenv/unsetenv, which MinGW does "
+    "not declare. Build and test Debug under WSL/Linux.")
 endif()
 
 # ---- Test framework --------------------------------------------------------

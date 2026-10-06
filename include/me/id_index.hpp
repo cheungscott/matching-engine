@@ -19,6 +19,7 @@
 
 #include "me/types.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstddef>

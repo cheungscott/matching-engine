@@ -386,7 +386,7 @@ int main() {
     // A report that leads with p50 can show a median improvement while hiding a tail
     // regression on the dominant operation. Column order is not cosmetic.
     std::printf("LATENCY, NANOSECONDS per operation — median of per-run percentiles\n");
-    std::printf("  %-18s %-10s %8s  %7s  %9s   %s\n", "", "", "p99.9", "p99", "max", "(p90 / p50)");
+    std::printf("  %-18s %-10s %8s  %7s  %9s   %s\n", "", "", "p99.9", "p99", "medmax", "(p90 / p50)");
     report("ALL", pct_all, static_cast<std::size_t>(kMeasured) * kRuns);
     for (int i = 0; i < kKinds; ++i) {
         report(name_of(static_cast<Kind>(i)), pct_kind[static_cast<std::size_t>(i)],

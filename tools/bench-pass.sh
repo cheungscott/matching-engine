@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -n) RUNS=$2; shift 2 ;;
     -b) BUILD_DIR=$2; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
